@@ -680,58 +680,41 @@ def submit_prediction(
         })
 
 @app.get("/user/predictions")
-@app.post("/predictions", response_model=PredictionResponse)
-def submit_prediction(
-    pred_data: PredictionCreate,
+def get_user_predictions(
     league_id: str,
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
-    """Submit or update prediction"""
     user = get_current_user(authorization, db)
-    
-    match = db.query(Match).filter(Match.id == pred_data.match_id).first()
-    if not match:
-        raise HTTPException(status_code=404, detail="Match not found")
-    
-    # Check X2 per gameweek rule
-    if pred_data.x2_apply:
-        # Check if user already used X2 in this gameweek
-        x2_in_gameweek = db.query(Prediction).join(Match).filter(
+
+    predictions = (
+        db.query(Prediction)
+        .filter(
             Prediction.user_id == user.id,
-            Prediction.league_id == league_id,
-            Prediction.x2_applied == True,
-            Match.gameweek == match.gameweek,
-            Prediction.match_id != pred_data.match_id  # Exclude current match
-        ).first()
-        
-        if x2_in_gameweek:
-            other_match = db.query(Match).filter(Match.id == x2_in_gameweek.match_id).first()
-            raise HTTPException(
-                status_code=400, 
-                detail=f"X2 already used for {other_match.home_team} vs {other_match.away_team} in Gameweek {match.gameweek}"
-            )
-    
-    predictions = db.query(Prediction).filter(
-        Prediction.user_id == user.id,
-        Prediction.league_id == league_id
-    ).all()
-    
+            Prediction.league_id == league_id
+        )
+        .all()
+    )
+
     result = []
+
     for pred in predictions:
-        match = db.query(Match).filter(Match.id == pred.match_id).first()
+        match = db.query(Match).filter(
+            Match.id == pred.match_id
+        ).first()
+
         result.append({
             "id": pred.id,
             "match_id": pred.match_id,
-            "home_team": match.home_team if match else "Unknown",
-            "away_team": match.away_team if match else "Unknown",
+            "home_team": match.home_team if match else "",
+            "away_team": match.away_team if match else "",
             "predicted_home_goals": pred.predicted_home_goals,
             "predicted_away_goals": pred.predicted_away_goals,
             "points_earned": pred.points_earned,
             "x2_applied": pred.x2_applied,
             "created_at": pred.created_at
         })
-    
+
     return result
 
 
