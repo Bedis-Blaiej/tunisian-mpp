@@ -517,6 +517,29 @@ def get_leaderboard(league_id: str, db: Session = Depends(get_db)) -> List[Leade
     return result
 
 
+'ADDED MANUALLY'
+@app.get("/user/leagues")
+def get_user_leagues(authorization: str = Header(None), db: Session = Depends(get_db)):
+    """Get all leagues for current user"""
+    user = get_current_user(authorization, db)
+    
+    league_members = db.query(LeagueMember).filter(
+        LeagueMember.user_id == user.id
+    ).all()
+    
+    result = []
+    for member in league_members:
+        league = db.query(League).filter(League.id == member.league_id).first()
+        if league:
+            result.append({
+                "id": league.id,
+                "name": league.name,
+                "invite_code": league.invite_code,
+                "created_at": league.created_at
+            })
+    
+    return result
+
 # ============ MATCH ENDPOINTS ============
 @app.post("/admin/matches")
 def create_match(
