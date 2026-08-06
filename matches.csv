@@ -1,0 +1,113 @@
+gameweek,date,time,home_team,away_team
+1,2026-08-22,15:30,Ben Guerdane,Hammam-Lif
+1,2026-08-22,15:30,CA Bizertin,Marsa
+1,2026-08-22,15:30,Esperance Tunis,Etoile Sahel
+1,2026-08-22,15:30,ES Zarzis,Olympique Beja
+1,2026-08-22,15:30,Hamam-Sousse,Monastir
+1,2026-08-22,15:30,Metlaoui,Club Africain
+1,2026-08-22,15:30,PS Sakiet Eddaier,JS Omrane
+1,2026-08-22,15:30,Stade Tunisien,CS Sfaxien
+2,2026-08-29,15:30,Club Africain,Hamam-Sousse
+2,2026-08-29,15:30,CS Sfaxien,ES Zarzis
+2,2026-08-29,15:30,Etoile Sahel,Metlaoui
+2,2026-08-29,15:30,Hammam-Lif,CA Bizertin
+2,2026-08-29,15:30,JS Omrane,Esperance Tunis
+2,2026-08-29,15:30,Marsa,PS Sakiet Eddaier
+2,2026-08-29,15:30,Monastir,Stade Tunisien
+2,2026-08-29,15:30,Olympique Beja,Ben Guerdane
+3,2026-09-05,15:30,Ben Guerdane,CS Sfaxien
+3,2026-09-05,15:30,CA Bizertin,Olympique Beja
+3,2026-09-05,15:30,Esperance Tunis,Marsa
+3,2026-09-05,15:30,ES Zarzis,Monastir
+3,2026-09-05,15:30,Etoile Sahel,JS Omrane
+3,2026-09-05,15:30,Metlaoui,Hamam-Sousse
+3,2026-09-05,15:30,PS Sakiet Eddaier,Hammam-Lif
+3,2026-09-05,15:30,Stade Tunisien,Club Africain
+4,2026-09-12,15:30,Club Africain,ES Zarzis
+4,2026-09-12,15:30,CS Sfaxien,CA Bizertin
+4,2026-09-12,15:30,Hamam-Sousse,Stade Tunisien
+4,2026-09-12,15:30,Hammam-Lif,Esperance Tunis
+4,2026-09-12,15:30,JS Omrane,Metlaoui
+4,2026-09-12,15:30,Marsa,Etoile Sahel
+4,2026-09-12,15:30,Monastir,Ben Guerdane
+4,2026-09-12,15:30,Olympique Beja,PS Sakiet Eddaier
+5,2026-10-10,15:30,Ben Guerdane,Club Africain
+5,2026-10-10,15:30,CA Bizertin,Monastir
+5,2026-10-10,15:30,Esperance Tunis,Olympique Beja
+5,2026-10-10,15:30,ES Zarzis,Hamam-Sousse
+5,2026-10-10,15:30,Etoile Sahel,Hammam-Lif
+5,2026-10-10,15:30,JS Omrane,Marsa
+5,2026-10-10,15:30,Metlaoui,Stade Tunisien
+5,2026-10-10,15:30,PS Sakiet Eddaier,CS Sfaxien
+6,2026-10-17,15:30,Club Africain,CA Bizertin
+6,2026-10-17,15:30,CS Sfaxien,Esperance Tunis
+6,2026-10-17,15:30,Hamam-Sousse,Ben Guerdane
+6,2026-10-17,15:30,Hammam-Lif,JS Omrane
+6,2026-10-17,15:30,Marsa,Metlaoui
+6,2026-10-17,15:30,Monastir,PS Sakiet Eddaier
+6,2026-10-17,15:30,Olympique Beja,Etoile Sahel
+6,2026-10-17,15:30,Stade Tunisien,ES Zarzis
+7,2026-10-24,15:30,Ben Guerdane,Stade Tunisien
+7,2026-10-24,15:30,CA Bizertin,Hamam-Sousse
+7,2026-10-24,15:30,Esperance Tunis,Monastir
+7,2026-10-24,15:30,Etoile Sahel,CS Sfaxien
+7,2026-10-24,15:30,JS Omrane,Olympique Beja
+7,2026-10-24,15:30,Marsa,Hammam-Lif
+7,2026-10-24,15:30,Metlaoui,ES Zarzis
+7,2026-10-24,15:30,PS Sakiet Eddaier,Club Africain
+8,2026-11-21,16:30,Club Africain,Esperance Tunis
+8,2026-11-21,16:30,CS Sfaxien,JS Omrane
+8,2026-11-21,16:30,ES Zarzis,Ben Guerdane
+8,2026-11-21,16:30,Hamam-Sousse,PS Sakiet Eddaier
+8,2026-11-21,16:30,Hammam-Lif,Metlaoui
+8,2026-11-21,16:30,Monastir,Etoile Sahel
+8,2026-11-21,16:30,Olympique Beja,Marsa
+8,2026-11-21,16:30,Stade Tunisien,CA Bizertin
+9,2026-11-28,16:30,CA Bizertin,ES Zarzis
+9,2026-11-28,16:30,Esperance Tunis,Hamam-Sousse
+9,2026-11-28,16:30,Etoile Sahel,Club Africain
+9,2026-11-28,16:30,Hammam-Lif,Olympique Beja
+9,2026-11-28,16:30,JS Omrane,Monastir
+9,2026-11-28,16:30,Marsa,CS Sfaxien
+9,2026-11-28,16:30,Metlaoui,Ben Guerdane
+9,2026-11-28,16:30,PS Sakiet Eddaier,Stade Tunisien
+10,2026-12-05,16:30,Ben Guerdane,CA Bizertin
+10,2026-12-05,16:30,Club Africain,JS Omrane
+10,2026-12-05,16:30,CS Sfaxien,Hammam-Lif
+10,2026-12-05,16:30,ES Zarzis,PS Sakiet Eddaier
+10,2026-12-05,16:30,Hamam-Sousse,Etoile Sahel
+10,2026-12-05,16:30,Monastir,Marsa
+10,2026-12-05,16:30,Olympique Beja,Metlaoui
+10,2026-12-05,16:30,Stade Tunisien,Esperance Tunis
+11,2026-12-12,16:30,Esperance Tunis,ES Zarzis
+11,2026-12-12,16:30,Etoile Sahel,Stade Tunisien
+11,2026-12-12,16:30,Hammam-Lif,Monastir
+11,2026-12-12,16:30,JS Omrane,Hamam-Sousse
+11,2026-12-12,16:30,Marsa,Club Africain
+11,2026-12-12,16:30,Metlaoui,CA Bizertin
+11,2026-12-12,16:30,Olympique Beja,CS Sfaxien
+11,2026-12-12,16:30,PS Sakiet Eddaier,Ben Guerdane
+12,2026-12-19,16:30,Ben Guerdane,Esperance Tunis
+12,2026-12-19,16:30,CA Bizertin,PS Sakiet Eddaier
+12,2026-12-19,16:30,Club Africain,Hammam-Lif
+12,2026-12-19,16:30,CS Sfaxien,Metlaoui
+12,2026-12-19,16:30,ES Zarzis,Etoile Sahel
+12,2026-12-19,16:30,Hamam-Sousse,Marsa
+12,2026-12-19,16:30,Monastir,Olympique Beja
+12,2026-12-19,16:30,Stade Tunisien,JS Omrane
+13,2026-12-26,16:30,CS Sfaxien,Monastir
+13,2026-12-26,16:30,Esperance Tunis,CA Bizertin
+13,2026-12-26,16:30,Etoile Sahel,Ben Guerdane
+13,2026-12-26,16:30,Hammam-Lif,Hamam-Sousse
+13,2026-12-26,16:30,JS Omrane,ES Zarzis
+13,2026-12-26,16:30,Marsa,Stade Tunisien
+13,2026-12-26,16:30,Metlaoui,PS Sakiet Eddaier
+13,2026-12-26,16:30,Olympique Beja,Club Africain
+14,2026-12-30,16:30,Ben Guerdane,JS Omrane
+14,2026-12-30,16:30,CA Bizertin,Etoile Sahel
+14,2026-12-30,16:30,Club Africain,CS Sfaxien
+14,2026-12-30,16:30,ES Zarzis,Marsa
+14,2026-12-30,16:30,Hamam-Sousse,Olympique Beja
+14,2026-12-30,16:30,Metlaoui,Monastir
+14,2026-12-30,16:30,PS Sakiet Eddaier,Esperance Tunis
+14,2026-12-30,16:30,Stade Tunisien,Hammam-Lif

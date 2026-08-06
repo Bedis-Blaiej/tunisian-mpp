@@ -427,7 +427,7 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
 @app.post("/leagues", response_model=LeagueResponse)
 def create_league(
     league_data: LeagueCreate,
-    authorization: str = None,
+    authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """Create new league"""
@@ -466,7 +466,7 @@ def create_league(
 @app.post("/leagues/{invite_code}/join", response_model=dict)
 def join_league(
     invite_code: str,
-    authorization: str = None,
+    authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """Join league via invite code"""
@@ -584,7 +584,7 @@ def get_matches(gameweek: Optional[int] = None, db: Session = Depends(get_db)):
 def submit_prediction(
     pred_data: PredictionCreate,
     league_id: str,
-    authorization: str = None,
+    authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """Submit or update prediction"""
@@ -652,7 +652,7 @@ def set_match_result(
     match_id: str,
     home_goals: int,
     away_goals: int,
-    authorization: str = None,
+    authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """Admin: Set match result and calculate points"""
