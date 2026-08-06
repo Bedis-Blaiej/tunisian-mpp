@@ -617,9 +617,10 @@ def submit_prediction(
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
     
-    # Check if match hasn't started
-    if match.kickoff_time <= datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Match already started")
+    # Check if match hasn't started (lockdown 15 min before)
+    lockdown_time = match.kickoff_time - timedelta(minutes=15)
+    if datetime.utcnow() >= lockdown_time:
+        raise HTTPException(status_code=400, detail="Prediction locked - match starting soon")
     
     # Determine result
     if pred_data.predicted_home_goals > pred_data.predicted_away_goals:
@@ -643,6 +644,16 @@ def submit_prediction(
         existing.predicted_result = predicted_result
         if pred_data.x2_apply:
             existing.x2_applied = True
+        db.commit()
+        db.refresh(existing)
+        return PredictionResponse(**{
+            "id": existing.id,
+            "match_id": pred_data.match_id,
+            "predicted_home_goals": existing.predicted_home_goals,
+            "predicted_away_goals": existing.predicted_away_goals,
+            "points_earned": existing.points_earned,
+            "created_at": existing.created_at
+        })
     else:
         # Create
         prediction = Prediction(
@@ -656,19 +667,48 @@ def submit_prediction(
             x2_applied=pred_data.x2_apply or False
         )
         db.add(prediction)
-    
-    db.commit()
-    
-    return PredictionResponse(**{
-        "id": existing.id if existing else prediction.id,
-        "match_id": pred_data.match_id,
-        "predicted_home_goals": pred_data.predicted_home_goals,
-        "predicted_away_goals": pred_data.predicted_away_goals,
-        "points_earned": 0,  # Will be calculated when match ends
-        "created_at": existing.created_at if existing else datetime.utcnow()
-    })
+        db.commit()
+        db.refresh(prediction)
+        
+        return PredictionResponse(**{
+            "id": prediction.id,
+            "match_id": pred_data.match_id,
+            "predicted_home_goals": prediction.predicted_home_goals,
+            "predicted_away_goals": prediction.predicted_away_goals,
+            "points_earned": prediction.points_earned,
+            "created_at": prediction.created_at
+        })
 
-
+@app.get("/user/predictions")
+def get_user_predictions(
+    league_id: str,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Get all predictions for current user in a league"""
+    user = get_current_user(authorization, db)
+    
+    predictions = db.query(Prediction).filter(
+        Prediction.user_id == user.id,
+        Prediction.league_id == league_id
+    ).all()
+    
+    result = []
+    for pred in predictions:
+        match = db.query(Match).filter(Match.id == pred.match_id).first()
+        result.append({
+            "id": pred.id,
+            "match_id": pred.match_id,
+            "home_team": match.home_team if match else "Unknown",
+            "away_team": match.away_team if match else "Unknown",
+            "predicted_home_goals": pred.predicted_home_goals,
+            "predicted_away_goals": pred.predicted_away_goals,
+            "points_earned": pred.points_earned,
+            "x2_applied": pred.x2_applied,
+            "created_at": pred.created_at
+        })
+    
+    return result
 # ============ ADMIN ENDPOINTS ============
 @app.put("/admin/matches/{match_id}/result")
 def set_match_result(
