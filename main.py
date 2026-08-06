@@ -264,17 +264,9 @@ def generate_invite_code() -> str:
 
 
 # ============ POINTS CALCULATION ============
-def calculate_points(prediction: Prediction, match: Match, all_predictions: List[Prediction]) -> dict:
+def calculate_points(prediction, match, all_predictions_for_match):
     """
     Calculate points for one prediction
-    
-    Returns:
-        {
-            'base_points': int,
-            'exact_bonus': int,
-            'total': int,
-            'is_exact': bool
-        }
     """
     
     # Get actual result
@@ -296,7 +288,7 @@ def calculate_points(prediction: Prediction, match: Match, all_predictions: List
     if prediction.predicted_result != actual_result:
         return {'base_points': 0, 'exact_bonus': 0, 'total': 0, 'is_exact': False}
     
-    # Get base points based on prediction
+    # Get base points based on result
     if actual_result == '1':
         base_points = match.odds_home
     elif actual_result == 'X':
@@ -312,12 +304,12 @@ def calculate_points(prediction: Prediction, match: Match, all_predictions: List
         is_exact = True
         # Count how many predicted this exact score
         exact_count = sum(
-            1 for p in all_predictions 
+            1 for p in all_predictions_for_match 
             if f"{p.predicted_home_goals}-{p.predicted_away_goals}" == actual_score
         )
         
         # Rarity bonus: fewer predictions = higher bonus
-        total_predictions = len(all_predictions)
+        total_predictions = len(all_predictions_for_match)
         rarity_multiplier = max(1.0, 2.0 - (exact_count / max(1, total_predictions)))
         exact_bonus = int(base_points * rarity_multiplier * 0.5)  # 50% bonus max
     
@@ -334,7 +326,7 @@ def calculate_points(prediction: Prediction, match: Match, all_predictions: List
     }
 
 
-def recalculate_league_standings(league_id: str, db: Session):
+def recalculate_league_standings(league_id, db):
     """Recalculate all scores in a league"""
     members = db.query(LeagueMember).filter(LeagueMember.league_id == league_id).all()
     
@@ -759,47 +751,43 @@ def set_match_result(
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
-    """Admin: Set match result and calculate points"""
+    """Admin: Set match result and auto-calculate points"""
     user = get_current_user(authorization, db)
     
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
     
-    # Update match
+    # Update match with actual result
     match.home_goals = home_goals
     match.away_goals = away_goals
     match.status = "finished"
-    
     db.commit()
     
-    # Recalculate points for all leagues with this match
-    predictions = db.query(Prediction).filter(
+    # Get all predictions for this match
+    all_predictions = db.query(Prediction).filter(
         Prediction.match_id == match_id
     ).all()
     
-    for pred in predictions:
-        all_preds = db.query(Prediction).filter(
-            Prediction.match_id == match_id,
-            Prediction.league_id == pred.league_id
-        ).all()
-        
-        points_data = calculate_points(pred, match, all_preds)
+    # Calculate points for each prediction
+    for pred in all_predictions:
+        points_data = calculate_points(pred, match, all_predictions)
         pred.points_earned = points_data['total']
         pred.is_exact_match = points_data['is_exact']
         pred.rarity_bonus = points_data['exact_bonus']
     
     db.commit()
     
-    # Update league standings
-    leagues_affected = set(p.league_id for p in predictions)
+    # Update league standings for all affected leagues
+    leagues_affected = set(p.league_id for p in all_predictions)
     for league_id in leagues_affected:
         recalculate_league_standings(league_id, db)
     
     return {
         "message": "Match result set and points calculated",
         "match_id": match_id,
-        "score": f"{home_goals}-{away_goals}"
+        "score": f"{home_goals}-{away_goals}",
+        "predictions_updated": len(all_predictions)
     }
 
 
