@@ -680,13 +680,37 @@ def submit_prediction(
         })
 
 @app.get("/user/predictions")
-def get_user_predictions(
+@app.post("/predictions", response_model=PredictionResponse)
+def submit_prediction(
+    pred_data: PredictionCreate,
     league_id: str,
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
-    """Get all predictions for current user in a league"""
+    """Submit or update prediction"""
     user = get_current_user(authorization, db)
+    
+    match = db.query(Match).filter(Match.id == pred_data.match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+    
+    # Check X2 per gameweek rule
+    if pred_data.x2_apply:
+        # Check if user already used X2 in this gameweek
+        x2_in_gameweek = db.query(Prediction).join(Match).filter(
+            Prediction.user_id == user.id,
+            Prediction.league_id == league_id,
+            Prediction.x2_applied == True,
+            Match.gameweek == match.gameweek,
+            Prediction.match_id != pred_data.match_id  # Exclude current match
+        ).first()
+        
+        if x2_in_gameweek:
+            other_match = db.query(Match).filter(Match.id == x2_in_gameweek.match_id).first()
+            raise HTTPException(
+                status_code=400, 
+                detail=f"X2 already used for {other_match.home_team} vs {other_match.away_team} in Gameweek {match.gameweek}"
+            )
     
     predictions = db.query(Prediction).filter(
         Prediction.user_id == user.id,
@@ -709,6 +733,40 @@ def get_user_predictions(
         })
     
     return result
+
+
+
+
+@app.get("/predictions/x2-status/{gameweek}")
+def check_x2_status(
+    gameweek: int,
+    league_id: str,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Check if user already used X2 in this gameweek"""
+    user = get_current_user(authorization, db)
+    
+    x2_prediction = db.query(Prediction).join(Match).filter(
+        Prediction.user_id == user.id,
+        Prediction.league_id == league_id,
+        Prediction.x2_applied == True,
+        Match.gameweek == gameweek
+    ).first()
+    
+    if x2_prediction:
+        match = db.query(Match).filter(Match.id == x2_prediction.match_id).first()
+        return {
+            "x2_used": True,
+            "used_for_match": f"{match.home_team} vs {match.away_team}",
+            "match_id": match.id
+        }
+    else:
+        return {
+            "x2_used": False,
+            "used_for_match": None,
+            "match_id": None
+        }
 # ============ ADMIN ENDPOINTS ============
 @app.put("/admin/matches/{match_id}/result")
 def set_match_result(
