@@ -34,15 +34,17 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI(title="Tunisian Score Prediction API")
 
 # CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
-        "https://tunisian-mpp-frontend.vercel.app"
+        "https://tunisian-mpp-frontend.vercel.app",
+        "https://tunisian-mpp.vercel.app",  # Add this too, in case
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicit methods
     allow_headers=["*"],
 )
 
