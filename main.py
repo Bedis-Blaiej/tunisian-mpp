@@ -881,6 +881,48 @@ def set_match_result(
         "predictions_updated": len(all_predictions)
     }
 
+@app.put("/admin/matches/{match_id}/reset")
+def reset_match_result(
+    match_id: str,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Admin: Reset match result (undo points calculation)"""
+    user = get_current_user(authorization, db)
+    
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+    
+    match_name = f"{match.home_team} vs {match.away_team}"
+    
+    # Reset match
+    match.home_goals = None
+    match.away_goals = None
+    match.status = "upcoming"
+    
+    # Reset all predictions for this match
+    predictions = db.query(Prediction).filter(
+        Prediction.match_id == match_id
+    ).all()
+    
+    for pred in predictions:
+        pred.points_earned = 0
+        pred.is_exact_match = False
+        pred.rarity_bonus = 0
+    
+    db.commit()
+    
+    # Recalculate standings for all affected leagues
+    leagues_affected = set(p.league_id for p in predictions)
+    for league_id in leagues_affected:
+        recalculate_league_standings(league_id, db)
+    
+    return {
+        "message": f"Match result reset: {match_name}",
+        "match_id": match_id,
+        "predictions_reset": len(predictions)
+    }
 
 # ============ HEALTH CHECK ============
 @app.get("/health")
