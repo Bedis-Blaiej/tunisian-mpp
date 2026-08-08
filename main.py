@@ -487,6 +487,84 @@ def join_league(
     
     return {"message": f"Joined {league.name}", "league_id": league.id}
 
+@app.delete("/leagues/{league_id}")
+def delete_league(
+    league_id: str,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Delete a league (creator or admin only)"""
+    user = get_current_user(authorization, db)
+    
+    league = db.query(League).filter(League.id == league_id).first()
+    if not league:
+        raise HTTPException(status_code=404, detail="League not found")
+    
+    # Check if user is creator OR admin
+    is_creator = league.created_by == user.id
+    is_admin = user.username == "admin"
+    
+    if not (is_creator or is_admin):
+        raise HTTPException(status_code=403, detail="Only league creator or admin can delete")
+    
+    league_name = league.name
+    
+    # Delete in correct order to avoid foreign key violations
+    # 1. Delete all predictions in this league
+    predictions = db.query(Prediction).filter(Prediction.league_id == league_id).all()
+    for pred in predictions:
+        db.delete(pred)
+    
+    # 2. Delete all league members
+    members = db.query(LeagueMember).filter(LeagueMember.league_id == league_id).all()
+    for member in members:
+        db.delete(member)
+    
+    # 3. Delete the league
+    db.delete(league)
+    
+    db.commit()
+    
+    return {
+        "message": f"League '{league_name}' deleted successfully",
+        "league_id": league_id,
+        "deleted_predictions": len(predictions),
+        "deleted_members": len(members)
+    }
+
+@app.get("/admin/leagues")
+def get_all_leagues(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Get all leagues (admin only)"""
+    user = get_current_user(authorization, db)
+    
+    # Check if admin
+    if user.username != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    
+    leagues = db.query(League).all()
+    
+    result = []
+    for league in leagues:
+        creator = db.query(User).filter(User.id == league.created_by).first()
+        member_count = db.query(LeagueMember).filter(LeagueMember.league_id == league.id).count()
+        prediction_count = db.query(Prediction).filter(Prediction.league_id == league.id).count()
+        
+        result.append({
+            "id": league.id,
+            "name": league.name,
+            "invite_code": league.invite_code,
+            "creator": creator.username if creator else "Unknown",
+            "created_at": league.created_at,
+            "status": league.status,
+            "members": member_count,
+            "predictions": prediction_count
+        })
+    
+    return result
+
 
 @app.get("/leagues/{league_id}/standings")
 def get_leaderboard(league_id: str, db: Session = Depends(get_db)) -> List[LeaderboardEntry]:
@@ -677,36 +755,47 @@ def get_user_predictions(
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
+    """Get all predictions for current user in a league with detailed breakdown"""
     user = get_current_user(authorization, db)
-
-    predictions = (
-        db.query(Prediction)
-        .filter(
-            Prediction.user_id == user.id,
-            Prediction.league_id == league_id
-        )
-        .all()
-    )
-
+    
+    predictions = db.query(Prediction).filter(
+        Prediction.user_id == user.id,
+        Prediction.league_id == league_id
+    ).all()
+    
     result = []
-
     for pred in predictions:
-        match = db.query(Match).filter(
-            Match.id == pred.match_id
-        ).first()
-
+        match = db.query(Match).filter(Match.id == pred.match_id).first()
+        
+        # Calculate breakdown
+        base_points = 0
+        if match.status == "finished":
+            if pred.predicted_result == '1':
+                base_points = match.odds_home if match.home_goals > match.away_goals else 0
+            elif pred.predicted_result == 'X':
+                base_points = match.odds_draw if match.home_goals == match.away_goals else 0
+            else:
+                base_points = match.odds_away if match.home_goals < match.away_goals else 0
+        
         result.append({
             "id": pred.id,
             "match_id": pred.match_id,
-            "home_team": match.home_team if match else "",
-            "away_team": match.away_team if match else "",
+            "home_team": match.home_team if match else "Unknown",
+            "away_team": match.away_team if match else "Unknown",
             "predicted_home_goals": pred.predicted_home_goals,
             "predicted_away_goals": pred.predicted_away_goals,
+            "actual_home_goals": match.home_goals if match.status == "finished" else None,
+            "actual_away_goals": match.away_goals if match.status == "finished" else None,
+            "match_status": match.status,
+            "base_points": base_points,
+            "exact_bonus": pred.rarity_bonus,
+            "x2_multiplier": 2 if pred.x2_applied else 1,
             "points_earned": pred.points_earned,
+            "is_exact_match": pred.is_exact_match,
             "x2_applied": pred.x2_applied,
             "created_at": pred.created_at
         })
-
+    
     return result
 
 
