@@ -26,6 +26,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 days
 ADMIN_USERNAME = "admin"
+TUNISIAN_LEAGUE_NAME = "Tunisian League"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -296,28 +297,68 @@ def calculate_points(prediction: Prediction, match: Match, all_predictions_for_m
     return {'base_points': base_points, 'exact_bonus': exact_bonus, 'total': total, 'is_exact': is_exact}
 
 
-def recalculate_league_standings(league_id: str, db: Session):
-    members = db.query(LeagueMember).filter(LeagueMember.league_id == league_id).all()
-    for member in members:
-        predictions = db.query(Prediction).filter(
-            Prediction.user_id == member.user_id,
-            Prediction.league_id == league_id
-        ).all()
-        total_points = 0
-        for pred in predictions:
-            match = db.query(Match).filter(Match.id == pred.match_id).first()
-            if match and match.status == "finished":
-                all_preds = db.query(Prediction).filter(
-                    Prediction.match_id == match.id,
-                    Prediction.league_id == league_id
-                ).all()
-                points_data = calculate_points(pred, match, all_preds)
-                pred.points_earned = points_data['total']
-                pred.is_exact_match = points_data['is_exact']
-                pred.rarity_bonus = points_data['exact_bonus']
-                total_points += points_data['total']
-        member.points = total_points
+def get_user_total_points(user_id: str, db: Session) -> int:
+    """A user's score is global: the sum of every finished prediction they've
+    ever made, regardless of which league it was submitted through. Every
+    league a user belongs to shows this same number — leagues are just
+    different groups of members viewing the same underlying score, like
+    Fantasy Premier League mini-leagues."""
+    total = 0
+    predictions = db.query(Prediction).filter(Prediction.user_id == user_id).all()
+    for pred in predictions:
+        match = db.query(Match).filter(Match.id == pred.match_id).first()
+        if match and match.status == "finished":
+            total += pred.points_earned
+    return total
+
+
+def recalc_all_members_points(db: Session):
+    """Refresh every league_member row's cached points from each user's
+    global score. Called whenever a match result is set or reset."""
+    for member in db.query(LeagueMember).all():
+        member.points = get_user_total_points(member.user_id, db)
     db.commit()
+
+
+def get_or_create_tunisian_league(db: Session) -> Optional[League]:
+    """The default league every user is automatically enrolled in, so the
+    app is usable immediately without creating/joining anything first."""
+    league = db.query(League).filter(League.name == TUNISIAN_LEAGUE_NAME).first()
+    if league:
+        return league
+
+    creator = db.query(User).filter(User.username == ADMIN_USERNAME).first()
+    if not creator:
+        creator = db.query(User).order_by(User.created_at).first()
+    if not creator:
+        return None  # no users exist yet; created lazily on first registration
+
+    league = League(
+        id=str(uuid.uuid4()),
+        name=TUNISIAN_LEAGUE_NAME,
+        invite_code=generate_invite_code(),
+        created_by=creator.id,
+        status="active",
+    )
+    db.add(league)
+    db.commit()
+    db.refresh(league)
+    return league
+
+
+def ensure_user_in_tunisian_league(user: User, db: Session):
+    league = get_or_create_tunisian_league(db)
+    if not league:
+        return
+    existing = db.query(LeagueMember).filter(
+        LeagueMember.league_id == league.id, LeagueMember.user_id == user.id
+    ).first()
+    if not existing:
+        db.add(LeagueMember(
+            id=str(uuid.uuid4()), league_id=league.id, user_id=user.id,
+            points=get_user_total_points(user.id, db),
+        ))
+        db.commit()
 
 
 # ============ AUTH ============
@@ -338,6 +379,8 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
 
+    ensure_user_in_tunisian_league(new_user, db)
+
     token = create_access_token(new_user.id)
     return TokenResponse(access_token=token, token_type="bearer", user=UserResponse(
         id=new_user.id, username=new_user.username, email=new_user.email, created_at=new_user.created_at
@@ -349,6 +392,9 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == user_data.email).first()
     if not user or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Lazily backfills accounts created before the Tunisian League existed.
+    ensure_user_in_tunisian_league(user, db)
 
     token = create_access_token(user.id)
     return TokenResponse(access_token=token, token_type="bearer", user=UserResponse(
@@ -376,7 +422,10 @@ def create_league(league_data: LeagueCreate, authorization: str = Header(None), 
     db.commit()
     db.refresh(new_league)
 
-    db.add(LeagueMember(id=str(uuid.uuid4()), league_id=new_league.id, user_id=user.id))
+    db.add(LeagueMember(
+        id=str(uuid.uuid4()), league_id=new_league.id, user_id=user.id,
+        points=get_user_total_points(user.id, db),
+    ))
     db.commit()
 
     return LeagueResponse(
@@ -418,7 +467,10 @@ def join_league(invite_code: str, authorization: str = Header(None), db: Session
     ).first():
         raise HTTPException(status_code=400, detail="Already in this league")
 
-    db.add(LeagueMember(id=str(uuid.uuid4()), league_id=league.id, user_id=user.id))
+    db.add(LeagueMember(
+        id=str(uuid.uuid4()), league_id=league.id, user_id=user.id,
+        points=get_user_total_points(user.id, db),
+    ))
     db.commit()
 
     return {"message": f"Joined {league.name}", "league_id": league.id}
@@ -431,6 +483,9 @@ def delete_league(league_id: str, authorization: str = Header(None), db: Session
     league = db.query(League).filter(League.id == league_id).first()
     if not league:
         raise HTTPException(status_code=404, detail="League not found")
+
+    if league.name == TUNISIAN_LEAGUE_NAME:
+        raise HTTPException(status_code=400, detail="The Tunisian League can't be deleted")
 
     is_creator = league.created_by == user.id
     is_admin = user.username == ADMIN_USERNAME
@@ -550,10 +605,14 @@ def get_available_gameweeks(db: Session = Depends(get_db)):
 @app.post("/predictions", response_model=PredictionResponse)
 def submit_prediction(
     pred_data: PredictionCreate,
-    league_id: str,
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
+    """Predictions are account-wide, not tied to a specific league: a user
+    fills in one score per match, and that same prediction/score is what
+    every league they belong to shows on its leaderboard. Internally it's
+    still stored against the Tunisian League row so the existing schema
+    (which requires a league_id) is satisfied."""
     user = get_current_user(authorization, db)
 
     match = db.query(Match).filter(Match.id == pred_data.match_id).first()
@@ -564,11 +623,14 @@ def submit_prediction(
     if datetime.utcnow() >= lockdown_time:
         raise HTTPException(status_code=400, detail="Predictions are locked - match starting soon")
 
-    # X2 per-gameweek validation
+    tunisian_league = get_or_create_tunisian_league(db)
+    ensure_user_in_tunisian_league(user, db)
+
+    # X2 per-gameweek validation — global across the account (one ×2 per
+    # gameweek total, since there's only ever one prediction per match now).
     if pred_data.x2_apply:
         x2_in_gameweek = db.query(Prediction).join(Match, Prediction.match_id == Match.id).filter(
             Prediction.user_id == user.id,
-            Prediction.league_id == league_id,
             Prediction.x2_applied == True,  # noqa: E712
             Match.gameweek == match.gameweek,
             Prediction.match_id != pred_data.match_id,
@@ -589,7 +651,6 @@ def submit_prediction(
 
     existing = db.query(Prediction).filter(
         Prediction.user_id == user.id,
-        Prediction.league_id == league_id,
         Prediction.match_id == pred_data.match_id
     ).first()
 
@@ -605,7 +666,7 @@ def submit_prediction(
         target = Prediction(
             id=str(uuid.uuid4()),
             user_id=user.id,
-            league_id=league_id,
+            league_id=tunisian_league.id,
             match_id=pred_data.match_id,
             predicted_home_goals=pred_data.predicted_home_goals,
             predicted_away_goals=pred_data.predicted_away_goals,
@@ -624,13 +685,15 @@ def submit_prediction(
 
 
 @app.get("/user/predictions")
-def get_user_predictions(league_id: str, authorization: str = Header(None), db: Session = Depends(get_db)):
-    """All predictions for current user in a league, with full points breakdown."""
+def get_user_predictions(
+    league_id: Optional[str] = None,  # kept for backward compatibility, no longer used to filter
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+):
+    """All of the current user's predictions (account-wide), with full points breakdown."""
     user = get_current_user(authorization, db)
 
-    predictions = db.query(Prediction).filter(
-        Prediction.user_id == user.id, Prediction.league_id == league_id
-    ).all()
+    predictions = db.query(Prediction).filter(Prediction.user_id == user.id).all()
 
     result = []
     for pred in predictions:
@@ -682,12 +745,16 @@ def get_user_predictions(league_id: str, authorization: str = Header(None), db: 
 
 
 @app.get("/predictions/x2-status/{gameweek}")
-def check_x2_status(gameweek: int, league_id: str, authorization: str = Header(None), db: Session = Depends(get_db)):
+def check_x2_status(
+    gameweek: int,
+    league_id: Optional[str] = None,  # kept for backward compatibility, no longer used to filter
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+):
     user = get_current_user(authorization, db)
 
     x2_prediction = db.query(Prediction).join(Match, Prediction.match_id == Match.id).filter(
         Prediction.user_id == user.id,
-        Prediction.league_id == league_id,
         Prediction.x2_applied == True,  # noqa: E712
         Match.gameweek == gameweek,
     ).first()
@@ -727,8 +794,7 @@ def set_match_result(
         pred.rarity_bonus = points_data['exact_bonus']
     db.commit()
 
-    for league_id in set(p.league_id for p in all_predictions):
-        recalculate_league_standings(league_id, db)
+    recalc_all_members_points(db)
 
     return {
         "message": "Match result set and points calculated",
@@ -759,8 +825,7 @@ def reset_match_result(match_id: str, authorization: str = Header(None), db: Ses
         pred.rarity_bonus = 0
     db.commit()
 
-    for league_id in set(p.league_id for p in predictions):
-        recalculate_league_standings(league_id, db)
+    recalc_all_members_points(db)
 
     return {
         "message": f"Match result reset: {match_name}",
