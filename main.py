@@ -15,8 +15,13 @@ import os
 import uuid
 import random
 import string
+import smtplib
+import ssl
+from email.mime.text import MIMEText
 from passlib.context import CryptContext
 from dotenv import load_dotenv
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 
 load_dotenv()
 
@@ -26,7 +31,18 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 days
 ADMIN_USERNAME = "admin"
+ADMIN_EMAILS = {"bblaiej@gmail.com"}
 TUNISIAN_LEAGUE_NAME = "Tunisian League"
+
+# Google Sign-In: create an OAuth client ID in Google Cloud Console (Web
+# application) and put it here. See SETUP notes in the delivery message.
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+
+# Email verification: sent via Gmail SMTP using an "App Password" (not your
+# normal Gmail password — generate one at myaccount.google.com/apppasswords).
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+VERIFICATION_CODE_TTL_MINUTES = 15
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -55,7 +71,11 @@ class User(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     username = Column(String(50), unique=True, index=True)
     email = Column(String(255), unique=True, index=True)
-    password_hash = Column(String(255))
+    password_hash = Column(String(255), nullable=True)  # null for Google-only accounts
+    auth_provider = Column(String(20), default="email")  # "email" or "google"
+    is_verified = Column(Boolean, default=False)
+    verification_code = Column(String(10), nullable=True)
+    verification_expires = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -126,11 +146,30 @@ class UserLogin(BaseModel):
     password: str
 
 
+class EmailVerify(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ResendCode(BaseModel):
+    email: EmailStr
+
+
+class GoogleAuth(BaseModel):
+    id_token: str
+
+
+class RegisterResponse(BaseModel):
+    message: str
+    email: str
+
+
 class UserResponse(BaseModel):
     id: str
     username: str
     email: str
     created_at: datetime
+    is_admin: bool = False
 
 
 class TokenResponse(BaseModel):
@@ -243,13 +282,58 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
     return user
 
 
+def is_admin_user(user: User) -> bool:
+    return user.username == ADMIN_USERNAME or (user.email or "").lower() in ADMIN_EMAILS
+
+
 def require_admin(user: User):
-    if user.username != ADMIN_USERNAME:
+    if not is_admin_user(user):
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def user_to_response(user: User) -> UserResponse:
+    return UserResponse(
+        id=user.id, username=user.username, email=user.email,
+        created_at=user.created_at, is_admin=is_admin_user(user),
+    )
 
 
 def generate_invite_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def generate_verification_code() -> str:
+    return ''.join(random.choices(string.digits, k=6))
+
+
+def send_verification_email(to_email: str, code: str):
+    """Sends a 6-digit code via Gmail SMTP. Requires GMAIL_ADDRESS and
+    GMAIL_APP_PASSWORD to be set (see delivery notes for how to generate an
+    App Password). Fails loudly rather than silently pretending to succeed,
+    so a misconfiguration is obvious instead of leaving users stuck."""
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="Email sending isn't configured yet (missing GMAIL_ADDRESS / GMAIL_APP_PASSWORD)."
+        )
+
+    body = (
+        f"Ton code de vérification Pronos Tunisie est : {code}\n\n"
+        f"Ce code expire dans {VERIFICATION_CODE_TTL_MINUTES} minutes.\n\n"
+        "Si tu n'es pas à l'origine de cette demande, ignore cet email."
+    )
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = f"{code} — Ton code de vérification Pronos Tunisie"
+    msg["From"] = f"Pronos Tunisie <{GMAIL_ADDRESS}>"
+    msg["To"] = to_email
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_ADDRESS, [to_email], msg.as_string())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Couldn't send verification email: {str(e)}")
 
 
 # ============ POINTS ENGINE ============
@@ -362,50 +446,149 @@ def ensure_user_in_tunisian_league(user: User, db: Session):
 
 
 # ============ AUTH ============
-@app.post("/auth/register", response_model=TokenResponse)
+@app.post("/auth/register", response_model=RegisterResponse)
 def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    """Creates the account but does NOT log the user in yet — a 6-digit
+    code is emailed to them, and /auth/verify-email exchanges a valid code
+    for the actual access token. This is what enforces "real emails only":
+    an account is useless until its owner proves they can receive mail
+    sent to it."""
     if db.query(User).filter(User.email == user_data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
 
+    code = generate_verification_code()
     new_user = User(
         id=str(uuid.uuid4()),
         username=user_data.username,
         email=user_data.email,
-        password_hash=hash_password(user_data.password)
+        password_hash=hash_password(user_data.password),
+        auth_provider="email",
+        is_verified=False,
+        verification_code=code,
+        verification_expires=datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_TTL_MINUTES),
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    ensure_user_in_tunisian_league(new_user, db)
+    send_verification_email(new_user.email, code)
 
-    token = create_access_token(new_user.id)
-    return TokenResponse(access_token=token, token_type="bearer", user=UserResponse(
-        id=new_user.id, username=new_user.username, email=new_user.email, created_at=new_user.created_at
-    ))
+    return RegisterResponse(message="Verification code sent", email=new_user.email)
+
+
+@app.post("/auth/verify-email", response_model=TokenResponse)
+def verify_email(payload: EmailVerify, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if user.is_verified:
+        raise HTTPException(status_code=400, detail="This email is already verified — try logging in")
+    if not user.verification_code or user.verification_code != payload.code:
+        raise HTTPException(status_code=400, detail="Incorrect code")
+    if not user.verification_expires or datetime.utcnow() > user.verification_expires:
+        raise HTTPException(status_code=400, detail="This code has expired — request a new one")
+
+    user.is_verified = True
+    user.verification_code = None
+    user.verification_expires = None
+    db.commit()
+
+    ensure_user_in_tunisian_league(user, db)
+
+    token = create_access_token(user.id)
+    return TokenResponse(access_token=token, token_type="bearer", user=user_to_response(user))
+
+
+@app.post("/auth/resend-code")
+def resend_code(payload: ResendCode, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if user.is_verified:
+        raise HTTPException(status_code=400, detail="This email is already verified — try logging in")
+
+    code = generate_verification_code()
+    user.verification_code = code
+    user.verification_expires = datetime.utcnow() + timedelta(minutes=VERIFICATION_CODE_TTL_MINUTES)
+    db.commit()
+
+    send_verification_email(user.email, code)
+    return {"message": "Verification code resent"}
 
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(user_data: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == user_data.email).first()
-    if not user or not verify_password(user_data.password, user.password_hash):
+    if not user or not user.password_hash or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
     # Lazily backfills accounts created before the Tunisian League existed.
     ensure_user_in_tunisian_league(user, db)
 
     token = create_access_token(user.id)
-    return TokenResponse(access_token=token, token_type="bearer", user=UserResponse(
-        id=user.id, username=user.username, email=user.email, created_at=user.created_at
-    ))
+    return TokenResponse(access_token=token, token_type="bearer", user=user_to_response(user))
+
+
+@app.post("/auth/google", response_model=TokenResponse)
+def google_auth(payload: GoogleAuth, db: Session = Depends(get_db)):
+    """Sign in / register with a Google account. Google has already
+    verified the email address, so these accounts are marked verified
+    immediately and need no code."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Google Sign-In isn't configured yet (missing GOOGLE_CLIENT_ID).")
+
+    try:
+        info = google_id_token.verify_oauth2_token(
+            payload.id_token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+
+    email = info.get("email")
+    if not email or not info.get("email_verified", False):
+        raise HTTPException(status_code=401, detail="Google account email isn't verified")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        base_username = email.split("@")[0][:40]
+        username = base_username
+        suffix = 0
+        while db.query(User).filter(User.username == username).first():
+            suffix += 1
+            username = f"{base_username}{suffix}"
+
+        user = User(
+            id=str(uuid.uuid4()),
+            username=username,
+            email=email,
+            password_hash=None,
+            auth_provider="google",
+            is_verified=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.is_verified:
+        # An existing email-registered (but unverified) account signing in
+        # with the same Google address — Google's confirmation is enough.
+        user.is_verified = True
+        db.commit()
+
+    ensure_user_in_tunisian_league(user, db)
+
+    token = create_access_token(user.id)
+    return TokenResponse(access_token=token, token_type="bearer", user=user_to_response(user))
 
 
 @app.get("/auth/me", response_model=UserResponse)
 def get_me(authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
-    return UserResponse(id=user.id, username=user.username, email=user.email, created_at=user.created_at)
+    return user_to_response(user)
+
 
 
 # ============ LEAGUES ============
@@ -488,7 +671,7 @@ def delete_league(league_id: str, authorization: str = Header(None), db: Session
         raise HTTPException(status_code=400, detail="The Tunisian League can't be deleted")
 
     is_creator = league.created_by == user.id
-    is_admin = user.username == ADMIN_USERNAME
+    is_admin = is_admin_user(user)
     if not (is_creator or is_admin):
         raise HTTPException(status_code=403, detail="Only the league creator or admin can delete this league")
 
