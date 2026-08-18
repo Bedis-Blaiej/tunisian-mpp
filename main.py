@@ -1,6 +1,6 @@
 """
 Tunisian Score Prediction App - FastAPI Backend
-Cleaned & fixed version
+Cleaned & fixed version — now using Resend for transactional email
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -15,9 +15,7 @@ import os
 import uuid
 import random
 import string
-import smtplib
-import ssl
-from email.mime.text import MIMEText
+import requests
 from passlib.context import CryptContext
 from dotenv import load_dotenv
 from google.oauth2 import id_token as google_id_token
@@ -38,10 +36,10 @@ TUNISIAN_LEAGUE_NAME = "Tunisian League"
 # application) and put it here. See SETUP notes in the delivery message.
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
-# Email verification: sent via Gmail SMTP using an "App Password" (not your
-# normal Gmail password — generate one at myaccount.google.com/apppasswords).
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+# Email verification: sent via Resend transactional email service
+# https://resend.com — sign up, verify your domain, generate an API key
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "")
 VERIFICATION_CODE_TTL_MINUTES = 15
 
 engine = create_engine(DATABASE_URL)
@@ -307,33 +305,63 @@ def generate_verification_code() -> str:
 
 
 def send_verification_email(to_email: str, code: str):
-    """Sends a 6-digit code via Gmail SMTP. Requires GMAIL_ADDRESS and
-    GMAIL_APP_PASSWORD to be set (see delivery notes for how to generate an
-    App Password). Fails loudly rather than silently pretending to succeed,
-    so a misconfiguration is obvious instead of leaving users stuck."""
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+    """Sends a 6-digit verification code via Resend transactional email.
+    Requires RESEND_API_KEY and RESEND_FROM_EMAIL to be set in environment.
+    Fails loudly rather than silently pretending to succeed."""
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
         raise HTTPException(
             status_code=500,
-            detail="Email sending isn't configured yet (missing GMAIL_ADDRESS / GMAIL_APP_PASSWORD)."
+            detail="Email sending isn't configured yet (missing RESEND_API_KEY / RESEND_FROM_EMAIL)."
         )
 
-    body = (
-        f"Ton code de vérification Pronos Tunisie est : {code}\n\n"
-        f"Ce code expire dans {VERIFICATION_CODE_TTL_MINUTES} minutes.\n\n"
-        "Si tu n'es pas à l'origine de cette demande, ignore cet email."
-    )
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"{code} — Ton code de vérification Pronos Tunisie"
-    msg["From"] = f"Pronos Tunisie <{GMAIL_ADDRESS}>"
-    msg["To"] = to_email
+    html_content = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h1 style="color: #333; margin-bottom: 20px;">Pronos Tunisie</h1>
+        <p style="color: #666; font-size: 16px; margin-bottom: 20px;">
+            Ton code de vérification Pronos Tunisie est :
+        </p>
+        <div style="background-color: #f0f0f0; padding: 20px; text-align: center; border-radius: 8px; margin-bottom: 20px;">
+            <p style="font-size: 32px; font-weight: bold; color: #333; letter-spacing: 4px; margin: 0;">
+                {code}
+            </p>
+        </div>
+        <p style="color: #999; font-size: 14px; margin-bottom: 20px;">
+            Ce code expire dans {VERIFICATION_CODE_TTL_MINUTES} minutes.
+        </p>
+        <p style="color: #999; font-size: 14px;">
+            Si tu n'es pas à l'origine de cette demande, ignore cet email.
+        </p>
+    </div>
+    """
+
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": to_email,
+        "subject": f"{code} — Ton code de vérification Pronos Tunisie",
+        "html": html_content,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_ADDRESS, [to_email], msg.as_string())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Couldn't send verification email: {str(e)}")
+        response = requests.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        error_detail = str(e)
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json().get('message', str(e))
+            except:
+                error_detail = e.response.text or str(e)
+        raise HTTPException(status_code=500, detail=f"Couldn't send verification email: {error_detail}")
 
 
 # ============ POINTS ENGINE ============
@@ -398,50 +426,45 @@ def get_user_total_points(user_id: str, db: Session) -> int:
 
 def recalc_all_members_points(db: Session):
     """Refresh every league_member row's cached points from each user's
-    global score. Called whenever a match result is set or reset."""
-    for member in db.query(LeagueMember).all():
+    account-wide total."""
+    members = db.query(LeagueMember).all()
+    for member in members:
         member.points = get_user_total_points(member.user_id, db)
     db.commit()
 
 
-def get_or_create_tunisian_league(db: Session) -> Optional[League]:
-    """The default league every user is automatically enrolled in, so the
-    app is usable immediately without creating/joining anything first."""
+def get_or_create_tunisian_league(db: Session) -> League:
+    """The Tunisian League is a read-only, single-entry system league that
+    all players belong to by default. It holds their account-wide predictions."""
     league = db.query(League).filter(League.name == TUNISIAN_LEAGUE_NAME).first()
-    if league:
-        return league
-
-    creator = db.query(User).filter(User.username == ADMIN_USERNAME).first()
-    if not creator:
-        creator = db.query(User).order_by(User.created_at).first()
-    if not creator:
-        return None  # no users exist yet; created lazily on first registration
-
-    league = League(
-        id=str(uuid.uuid4()),
-        name=TUNISIAN_LEAGUE_NAME,
-        invite_code=generate_invite_code(),
-        created_by=creator.id,
-        status="active",
-    )
-    db.add(league)
-    db.commit()
-    db.refresh(league)
+    if not league:
+        league = League(
+            id=str(uuid.uuid4()),
+            name=TUNISIAN_LEAGUE_NAME,
+            invite_code="SYSTEM",
+            created_by="system",
+            status="system",
+        )
+        db.add(league)
+        db.commit()
+        db.refresh(league)
     return league
 
 
 def ensure_user_in_tunisian_league(user: User, db: Session):
+    """Ensures the user is a member of the Tunisian League."""
     league = get_or_create_tunisian_league(db)
-    if not league:
-        return
-    existing = db.query(LeagueMember).filter(
-        LeagueMember.league_id == league.id, LeagueMember.user_id == user.id
+    membership = db.query(LeagueMember).filter(
+        LeagueMember.league_id == league.id,
+        LeagueMember.user_id == user.id
     ).first()
-    if not existing:
-        db.add(LeagueMember(
-            id=str(uuid.uuid4()), league_id=league.id, user_id=user.id,
-            points=get_user_total_points(user.id, db),
-        ))
+    if not membership:
+        membership = LeagueMember(
+            id=str(uuid.uuid4()),
+            league_id=league.id,
+            user_id=user.id,
+        )
+        db.add(membership)
         db.commit()
 
 
@@ -600,140 +623,163 @@ def create_league(league_data: LeagueCreate, authorization: str = Header(None), 
     while db.query(League).filter(League.invite_code == invite_code).first():
         invite_code = generate_invite_code()
 
-    new_league = League(id=str(uuid.uuid4()), name=league_data.name, invite_code=invite_code, created_by=user.id)
+    new_league = League(
+        id=str(uuid.uuid4()),
+        name=league_data.name,
+        invite_code=invite_code,
+        created_by=user.id,
+    )
     db.add(new_league)
     db.commit()
     db.refresh(new_league)
 
-    db.add(LeagueMember(
-        id=str(uuid.uuid4()), league_id=new_league.id, user_id=user.id,
-        points=get_user_total_points(user.id, db),
-    ))
+    member = LeagueMember(
+        id=str(uuid.uuid4()),
+        league_id=new_league.id,
+        user_id=user.id,
+    )
+    db.add(member)
     db.commit()
 
     return LeagueResponse(
-        id=new_league.id, name=new_league.name, invite_code=new_league.invite_code, created_at=new_league.created_at
+        id=new_league.id,
+        name=new_league.name,
+        invite_code=new_league.invite_code,
+        created_at=new_league.created_at,
     )
+
+
+@app.get("/leagues/{league_id}", response_model=LeagueResponse)
+def get_league(league_id: str, db: Session = Depends(get_db)):
+    league = db.query(League).filter(League.id == league_id).first()
+    if not league:
+        raise HTTPException(status_code=404, detail="League not found")
+    return LeagueResponse(
+        id=league.id,
+        name=league.name,
+        invite_code=league.invite_code,
+        created_at=league.created_at,
+    )
+
+
+@app.get("/leagues/invite/{invite_code}", response_model=LeagueResponse)
+def get_league_by_invite(invite_code: str, db: Session = Depends(get_db)):
+    league = db.query(League).filter(League.invite_code == invite_code).first()
+    if not league:
+        raise HTTPException(status_code=404, detail="League not found")
+    return LeagueResponse(
+        id=league.id,
+        name=league.name,
+        invite_code=league.invite_code,
+        created_at=league.created_at,
+    )
+
+
+@app.post("/leagues/{league_id}/join")
+def join_league(league_id: str, authorization: str = Header(None), db: Session = Depends(get_db)):
+    user = get_current_user(authorization, db)
+    league = db.query(League).filter(League.id == league_id).first()
+    if not league:
+        raise HTTPException(status_code=404, detail="League not found")
+
+    existing = db.query(LeagueMember).filter(
+        LeagueMember.league_id == league_id,
+        LeagueMember.user_id == user.id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Already a member of this league")
+
+    member = LeagueMember(
+        id=str(uuid.uuid4()),
+        league_id=league_id,
+        user_id=user.id,
+    )
+    db.add(member)
+    db.commit()
+
+    return {"message": f"Joined {league.name}"}
+
+
+@app.post("/leagues/invite/{invite_code}/join")
+def join_league_by_invite(invite_code: str, authorization: str = Header(None), db: Session = Depends(get_db)):
+    user = get_current_user(authorization, db)
+    league = db.query(League).filter(League.invite_code == invite_code).first()
+    if not league:
+        raise HTTPException(status_code=404, detail="Invite code not found")
+
+    existing = db.query(LeagueMember).filter(
+        LeagueMember.league_id == league.id,
+        LeagueMember.user_id == user.id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Already a member of this league")
+
+    member = LeagueMember(
+        id=str(uuid.uuid4()),
+        league_id=league.id,
+        user_id=user.id,
+    )
+    db.add(member)
+    db.commit()
+
+    return {"message": f"Joined {league.name}", "league_id": league.id}
 
 
 @app.get("/user/leagues")
 def get_user_leagues(authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
     memberships = db.query(LeagueMember).filter(LeagueMember.user_id == user.id).all()
-
     result = []
-    for member in memberships:
-        league = db.query(League).filter(League.id == member.league_id).first()
+    for m in memberships:
+        league = db.query(League).filter(League.id == m.league_id).first()
         if league:
-            member_count = db.query(LeagueMember).filter(LeagueMember.league_id == league.id).count()
             result.append({
                 "id": league.id,
                 "name": league.name,
                 "invite_code": league.invite_code,
                 "created_at": league.created_at,
-                "member_count": member_count,
-                "my_points": member.points,
+                "points": m.points,
             })
     return result
 
 
-@app.post("/leagues/{invite_code}/join")
-def join_league(invite_code: str, authorization: str = Header(None), db: Session = Depends(get_db)):
-    user = get_current_user(authorization, db)
+@app.get("/leagues/{league_id}/leaderboard")
+def get_leaderboard(league_id: str, db: Session = Depends(get_db)):
+    members = db.query(LeagueMember).filter(LeagueMember.league_id == league_id).order_by(
+        LeagueMember.points.desc()
+    ).all()
 
-    league = db.query(League).filter(League.invite_code == invite_code.upper()).first()
-    if not league:
-        raise HTTPException(status_code=404, detail="League not found")
-
-    if db.query(LeagueMember).filter(
-        LeagueMember.league_id == league.id, LeagueMember.user_id == user.id
-    ).first():
-        raise HTTPException(status_code=400, detail="Already in this league")
-
-    db.add(LeagueMember(
-        id=str(uuid.uuid4()), league_id=league.id, user_id=user.id,
-        points=get_user_total_points(user.id, db),
-    ))
-    db.commit()
-
-    return {"message": f"Joined {league.name}", "league_id": league.id}
+    result = []
+    for rank, m in enumerate(members, start=1):
+        user = db.query(User).filter(User.id == m.user_id).first()
+        if user:
+            result.append(LeaderboardEntry(
+                user_id=user.id,
+                username=user.username,
+                points=m.points,
+                rank=rank,
+            ))
+    return result
 
 
 @app.delete("/leagues/{league_id}")
 def delete_league(league_id: str, authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
-
     league = db.query(League).filter(League.id == league_id).first()
     if not league:
         raise HTTPException(status_code=404, detail="League not found")
+    if league.created_by != user.id:
+        raise HTTPException(status_code=403, detail="Only the league creator can delete it")
 
-    if league.name == TUNISIAN_LEAGUE_NAME:
-        raise HTTPException(status_code=400, detail="The Tunisian League can't be deleted")
+    db.query(LeagueMember).filter(LeagueMember.league_id == league_id).delete()
+    db.delete(league)
+    db.commit()
 
-    is_creator = league.created_by == user.id
-    is_admin = is_admin_user(user)
-    if not (is_creator or is_admin):
-        raise HTTPException(status_code=403, detail="Only the league creator or admin can delete this league")
-
-    league_name = league.name
-
-    try:
-        pred_count = db.query(Prediction).filter(Prediction.league_id == league_id).delete(synchronize_session=False)
-        member_count = db.query(LeagueMember).filter(LeagueMember.league_id == league_id).delete(synchronize_session=False)
-        db.query(League).filter(League.id == league_id).delete(synchronize_session=False)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete league: {str(e)}")
-
-    return {
-        "message": f"League '{league_name}' deleted successfully",
-        "league_id": league_id,
-        "deleted_predictions": pred_count,
-        "deleted_members": member_count,
-    }
-
-
-@app.get("/admin/leagues")
-def get_all_leagues(authorization: str = Header(None), db: Session = Depends(get_db)):
-    user = get_current_user(authorization, db)
-    require_admin(user)
-
-    leagues = db.query(League).all()
-    result = []
-    for league in leagues:
-        creator = db.query(User).filter(User.id == league.created_by).first()
-        result.append({
-            "id": league.id,
-            "name": league.name,
-            "invite_code": league.invite_code,
-            "creator": creator.username if creator else "Unknown",
-            "created_at": league.created_at,
-            "status": league.status,
-            "members": db.query(LeagueMember).filter(LeagueMember.league_id == league.id).count(),
-            "predictions": db.query(Prediction).filter(Prediction.league_id == league.id).count(),
-        })
-    return result
-
-
-@app.get("/leagues/{league_id}/standings")
-def get_leaderboard(league_id: str, db: Session = Depends(get_db)) -> List[LeaderboardEntry]:
-    members = db.query(LeagueMember).filter(
-        LeagueMember.league_id == league_id
-    ).order_by(LeagueMember.points.desc()).all()
-
-    result = []
-    for rank, member in enumerate(members, 1):
-        user = db.query(User).filter(User.id == member.user_id).first()
-        result.append(LeaderboardEntry(
-            user_id=member.user_id, username=user.username if user else "Unknown",
-            points=member.points, rank=rank
-        ))
-    return result
+    return {"message": "League deleted"}
 
 
 # ============ MATCHES ============
-@app.post("/admin/matches")
+@app.post("/matches", response_model=MatchResponse)
 def create_match(match_data: MatchCreate, authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
     require_admin(user)
@@ -753,35 +799,66 @@ def create_match(match_data: MatchCreate, authorization: str = Header(None), db:
     db.refresh(new_match)
 
     return MatchResponse(
-        id=new_match.id, home_team=new_match.home_team, away_team=new_match.away_team,
-        gameweek=new_match.gameweek, kickoff_time=new_match.kickoff_time, status=new_match.status,
-        home_goals=new_match.home_goals, away_goals=new_match.away_goals,
-        odds_home=new_match.odds_home, odds_draw=new_match.odds_draw, odds_away=new_match.odds_away,
+        id=new_match.id,
+        home_team=new_match.home_team,
+        away_team=new_match.away_team,
+        gameweek=new_match.gameweek,
+        kickoff_time=new_match.kickoff_time,
+        status=new_match.status,
+        home_goals=new_match.home_goals,
+        away_goals=new_match.away_goals,
+        odds_home=new_match.odds_home,
+        odds_draw=new_match.odds_draw,
+        odds_away=new_match.odds_away,
     )
 
 
-@app.get("/matches", response_model=List[MatchResponse])
-def get_matches(gameweek: Optional[int] = None, db: Session = Depends(get_db)):
+@app.get("/matches")
+def get_matches(gameweek: Optional[int] = None, status: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(Match)
-    if gameweek:
+    if gameweek is not None:
         query = query.filter(Match.gameweek == gameweek)
-    matches = query.order_by(Match.kickoff_time).all()
+    if status:
+        query = query.filter(Match.status == status)
+    matches = query.all()
 
     return [
         MatchResponse(
-            id=m.id, home_team=m.home_team, away_team=m.away_team, gameweek=m.gameweek,
-            kickoff_time=m.kickoff_time, status=m.status, home_goals=m.home_goals, away_goals=m.away_goals,
-            odds_home=m.odds_home, odds_draw=m.odds_draw, odds_away=m.odds_away,
+            id=m.id,
+            home_team=m.home_team,
+            away_team=m.away_team,
+            gameweek=m.gameweek,
+            kickoff_time=m.kickoff_time,
+            status=m.status,
+            home_goals=m.home_goals,
+            away_goals=m.away_goals,
+            odds_home=m.odds_home,
+            odds_draw=m.odds_draw,
+            odds_away=m.odds_away,
         )
         for m in matches
     ]
 
 
-@app.get("/matches/gameweeks")
-def get_available_gameweeks(db: Session = Depends(get_db)):
-    """Return the distinct list of gameweeks that have matches, so frontend nav isn't guessing."""
-    rows = db.query(Match.gameweek).distinct().order_by(Match.gameweek).all()
-    return [r[0] for r in rows]
+@app.get("/matches/{match_id}", response_model=MatchResponse)
+def get_match(match_id: str, db: Session = Depends(get_db)):
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    return MatchResponse(
+        id=match.id,
+        home_team=match.home_team,
+        away_team=match.away_team,
+        gameweek=match.gameweek,
+        kickoff_time=match.kickoff_time,
+        status=match.status,
+        home_goals=match.home_goals,
+        away_goals=match.away_goals,
+        odds_home=match.odds_home,
+        odds_draw=match.odds_draw,
+        odds_away=match.odds_away,
+    )
 
 
 # ============ PREDICTIONS ============
