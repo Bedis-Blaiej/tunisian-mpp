@@ -8,9 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
+from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from typing import List, Optional
 import jwt
+import logging
 import os
 import uuid
 import random
@@ -31,6 +33,18 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 days
 ADMIN_USERNAME = "admin"
 ADMIN_EMAILS = {"bblaiej@gmail.com"}
 TUNISIAN_LEAGUE_NAME = "Tunisian League"
+
+# API-Football supplies the official final scores. The key must be stored as a
+# Railway variable and is intentionally never returned by this API.
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
+API_FOOTBALL_TUNISIA_LEAGUE_ID = int(os.getenv("API_FOOTBALL_TUNISIA_LEAGUE_ID", "202"))
+API_FOOTBALL_SEASON = int(os.getenv("API_FOOTBALL_SEASON", str(datetime.utcnow().year)))
+RESULT_SYNC_INTERVAL_MINUTES = int(os.getenv("RESULT_SYNC_INTERVAL_MINUTES", "30"))
+RESULT_SYNC_MINUTES_AFTER_KICKOFF = int(os.getenv("RESULT_SYNC_MINUTES_AFTER_KICKOFF", "105"))
+RESULT_SYNC_LOOKBACK_HOURS = int(os.getenv("RESULT_SYNC_LOOKBACK_HOURS", "24"))
+
+logger = logging.getLogger(__name__)
 
 # Google Sign-In: create an OAuth client ID in Google Cloud Console (Web
 # application) and put it here. See SETUP notes in the delivery message.
@@ -431,6 +445,123 @@ def recalc_all_members_points(db: Session):
     for member in members:
         member.points = get_user_total_points(member.user_id, db)
     db.commit()
+
+
+def apply_match_result(match: Match, home_goals: int, away_goals: int, db: Session) -> int:
+    """Save a final score and recalculate every affected prediction."""
+    match.home_goals = home_goals
+    match.away_goals = away_goals
+    match.status = "finished"
+
+    all_predictions = db.query(Prediction).filter(Prediction.match_id == match.id).all()
+    for prediction in all_predictions:
+        points_data = calculate_points(prediction, match, all_predictions)
+        prediction.points_earned = points_data['total']
+        prediction.is_exact_match = points_data['is_exact']
+        prediction.rarity_bonus = points_data['exact_bonus']
+
+    db.commit()
+    recalc_all_members_points(db)
+    return len(all_predictions)
+
+
+def normalise_team_name(name: str) -> str:
+    """Normalise provider and local team names for reliable fixture matching."""
+    import unicodedata
+
+    normalised = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+    for token in (" de ", " du ", "union sportive ", "us ", "es ", "cs ", "as ", "ca "):
+        normalised = normalised.replace(token, "")
+    normalised = "".join(character for character in normalised if character.isalnum())
+    # Keep local display names compatible with their provider spelling.
+    return {"hamamsousse": "hammamsousse"}.get(normalised, normalised)
+
+
+def find_provider_fixture(match: Match, fixtures: list) -> Optional[dict]:
+    home_name = normalise_team_name(match.home_team)
+    away_name = normalise_team_name(match.away_team)
+
+    def names_match(first: str, second: str) -> bool:
+        return first == second or (min(len(first), len(second)) >= 5 and (first.startswith(second) or second.startswith(first)))
+
+    for fixture in fixtures:
+        teams = fixture.get("teams", {})
+        if (
+            names_match(normalise_team_name(teams.get("home", {}).get("name", "")), home_name)
+            and names_match(normalise_team_name(teams.get("away", {}).get("name", "")), away_name)
+        ):
+            return fixture
+    return None
+
+
+def sync_finished_match_results() -> dict:
+    """Import only final API-Football results for recently completed matches."""
+    if not API_FOOTBALL_KEY:
+        logger.warning("Final-score sync skipped: API_FOOTBALL_KEY is not configured")
+        return {"updated": 0, "checked_dates": 0, "reason": "API_FOOTBALL_KEY is not configured"}
+
+    now = datetime.utcnow()
+    earliest_kickoff = now - timedelta(hours=RESULT_SYNC_LOOKBACK_HOURS)
+    latest_kickoff = now - timedelta(minutes=RESULT_SYNC_MINUTES_AFTER_KICKOFF)
+    db = SessionLocal()
+    updated = 0
+    checked_dates = 0
+
+    try:
+        candidates = db.query(Match).filter(
+            Match.status != "finished",
+            Match.kickoff_time >= earliest_kickoff,
+            Match.kickoff_time <= latest_kickoff,
+        ).all()
+        candidates_by_date = {}
+        for match in candidates:
+            candidates_by_date.setdefault(match.kickoff_time.date(), []).append(match)
+
+        headers = {"x-apisports-key": API_FOOTBALL_KEY}
+        final_statuses = {"FT", "AET", "PEN"}
+        for match_date, matches in candidates_by_date.items():
+            response = requests.get(
+                f"{API_FOOTBALL_BASE_URL}/fixtures",
+                headers=headers,
+                params={
+                    "league": API_FOOTBALL_TUNISIA_LEAGUE_ID,
+                    "season": API_FOOTBALL_SEASON,
+                    "date": match_date.isoformat(),
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("errors"):
+                logger.warning("API-Football returned errors for %s: %s", match_date, payload["errors"])
+                continue
+
+            checked_dates += 1
+            fixtures = payload.get("response", [])
+            for match in matches:
+                fixture = find_provider_fixture(match, fixtures)
+                if not fixture:
+                    logger.info("No API-Football fixture found for %s vs %s", match.home_team, match.away_team)
+                    continue
+
+                if fixture.get("fixture", {}).get("status", {}).get("short") not in final_statuses:
+                    continue
+
+                goals = fixture.get("goals", {})
+                home_goals, away_goals = goals.get("home"), goals.get("away")
+                if not isinstance(home_goals, int) or not isinstance(away_goals, int):
+                    logger.warning("Final fixture has no valid score for %s vs %s", match.home_team, match.away_team)
+                    continue
+
+                apply_match_result(match, home_goals, away_goals, db)
+                updated += 1
+
+        return {"updated": updated, "checked_dates": checked_dates, "eligible_matches": len(candidates)}
+    except requests.RequestException as error:
+        logger.exception("API-Football final-score sync failed: %s", error)
+        return {"updated": updated, "checked_dates": checked_dates, "error": "Could not reach API-Football"}
+    finally:
+        db.close()
 
 
 def get_or_create_tunisian_league(db: Session) -> League:
@@ -1047,27 +1178,22 @@ def set_match_result(
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    match.home_goals = home_goals
-    match.away_goals = away_goals
-    match.status = "finished"
-    db.commit()
-
-    all_predictions = db.query(Prediction).filter(Prediction.match_id == match_id).all()
-    for pred in all_predictions:
-        points_data = calculate_points(pred, match, all_predictions)
-        pred.points_earned = points_data['total']
-        pred.is_exact_match = points_data['is_exact']
-        pred.rarity_bonus = points_data['exact_bonus']
-    db.commit()
-
-    recalc_all_members_points(db)
+    predictions_updated = apply_match_result(match, home_goals, away_goals, db)
 
     return {
         "message": "Match result set and points calculated",
         "match_id": match_id,
         "score": f"{home_goals}-{away_goals}",
-        "predictions_updated": len(all_predictions),
+        "predictions_updated": predictions_updated,
     }
+
+
+@app.post("/admin/results/sync")
+def sync_results_now(authorization: str = Header(None), db: Session = Depends(get_db)):
+    """Allow an administrator to run the final-score import immediately."""
+    user = get_current_user(authorization, db)
+    require_admin(user)
+    return sync_finished_match_results()
 
 
 @app.put("/admin/matches/{match_id}/reset")
@@ -1103,7 +1229,32 @@ def reset_match_result(match_id: str, authorization: str = Header(None), db: Ses
 # ============ HEALTH ============
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "final_score_sync_configured": bool(API_FOOTBALL_KEY)}
+
+
+score_sync_scheduler = BackgroundScheduler(timezone="UTC")
+
+
+@app.on_event("startup")
+def start_score_sync_scheduler():
+    if API_FOOTBALL_KEY and not score_sync_scheduler.running:
+        score_sync_scheduler.add_job(
+            sync_finished_match_results,
+            "interval",
+            minutes=RESULT_SYNC_INTERVAL_MINUTES,
+            id="api-football-final-score-sync",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        score_sync_scheduler.start()
+        logger.info("Final-score sync scheduled every %s minutes", RESULT_SYNC_INTERVAL_MINUTES)
+
+
+@app.on_event("shutdown")
+def stop_score_sync_scheduler():
+    if score_sync_scheduler.running:
+        score_sync_scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":
