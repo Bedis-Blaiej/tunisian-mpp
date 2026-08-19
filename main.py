@@ -762,6 +762,12 @@ def get_leaderboard(league_id: str, db: Session = Depends(get_db)):
     return result
 
 
+@app.get("/leagues/{league_id}/standings")
+def get_standings(league_id: str, db: Session = Depends(get_db)):
+    """Backward-compatible alias for the league leaderboard."""
+    return get_leaderboard(league_id, db)
+
+
 @app.delete("/leagues/{league_id}")
 def delete_league(league_id: str, authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
