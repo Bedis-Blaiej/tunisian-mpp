@@ -1140,46 +1140,6 @@ def get_user_predictions(
         })
     return result
 
-# Add this endpoint to main.py (after the get_user_predictions endpoint, around line 1142)
-
-@app.get("/users/{user_id}/predictions/finished")
-def get_user_finished_predictions(user_id: str, db: Session = Depends(get_db)):
-    """Get another user's predictions for finished matches only."""
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    predictions = db.query(Prediction).filter(Prediction.user_id == user_id).all()
-
-    result = []
-    for pred in predictions:
-        match = db.query(Match).filter(Match.id == pred.match_id).first()
-        if not match or match.status != "finished":
-            continue
-
-        base_points = 0
-        if pred.predicted_result == '1':
-            base_points = match.odds_home if match.home_goals > match.away_goals else 0
-        elif pred.predicted_result == 'X':
-            base_points = match.odds_draw if match.home_goals == match.away_goals else 0
-        else:
-            base_points = match.odds_away if match.home_goals < match.away_goals else 0
-
-        result.append({
-            "id": pred.id,
-            "match_id": pred.match_id,
-            "home_team": match.home_team,
-            "away_team": match.away_team,
-            "gameweek": match.gameweek,
-            "predicted_home_goals": pred.predicted_home_goals,
-            "predicted_away_goals": pred.predicted_away_goals,
-            "actual_home_goals": match.home_goals,
-            "actual_away_goals": match.away_goals,
-            "points_earned": pred.points_earned,
-            "is_exact_match": pred.is_exact_match,
-        })
-    
-    return sorted(result, key=lambda x: x['gameweek'])
 
 @app.get("/predictions/x2-status/{gameweek}")
 def check_x2_status(
