@@ -84,11 +84,30 @@ class User(Base):
     username = Column(String(50), unique=True, index=True)
     email = Column(String(255), unique=True, index=True)
     password_hash = Column(String(255), nullable=True)  # null for Google-only accounts
+    password_reset_code = Column(String, nullable=True)
+    password_reset_expires = Column(DateTime, nullable=True)
     auth_provider = Column(String(20), default="email")  # "email" or "google"
     is_verified = Column(Boolean, default=False)
     verification_code = Column(String(10), nullable=True)
     verification_expires = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    email_sent: bool
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    reset_code: str
+    new_password: str
+
+class ResetPasswordResponse(BaseModel):
+    message: str
+    success: bool
 
 
 class League(Base):
@@ -743,6 +762,79 @@ def get_me(authorization: str = Header(None), db: Session = Depends(get_db)):
     user = get_current_user(authorization, db)
     return user_to_response(user)
 
+
+@app.post("/auth/forgot-password", response_model=ForgotPasswordResponse)
+def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Request password reset code via email."""
+    email = request.email.strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        # Don't reveal if email exists (security)
+        return ForgotPasswordResponse(message="If an account exists with this email, a reset code has been sent.", email_sent=True)
+    
+    # Don't allow reset for Google-only accounts
+    if user.auth_provider == "google" or not user.password_hash:
+        return ForgotPasswordResponse(message="This account uses Google Sign-In. Please use Google to reset your password.", email_sent=False)
+    
+    # Generate reset code
+    reset_code = ''.join(random.choices(string.digits, k=6))
+    user.password_reset_code = reset_code
+    user.password_reset_expires = datetime.utcnow() + timedelta(minutes=15)
+    db.commit()
+    
+    # Send email
+    try:
+        send_email(
+            email=user.email,
+            subject="Réinitialise ton mot de passe - Pronos Tunisie",
+            html=f"""
+            <h2>Réinitialise ton mot de passe</h2>
+            <p>Ton code de réinitialisation:</p>
+            <h1 style="letter-spacing: 5px; font-family: monospace;">{reset_code}</h1>
+            <p>Ce code expire dans 15 minutes.</p>
+            <p>Si tu n'as pas demandé une réinitialisation, ignore cet email.</p>
+            """
+        )
+        print(f"[INFO] Password reset code sent to {user.email}")
+        return ForgotPasswordResponse(message="Reset code sent to your email", email_sent=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to send password reset email: {e}")
+        return ForgotPasswordResponse(message="Failed to send reset code. Please try again.", email_sent=False)
+
+
+@app.post("/auth/reset-password", response_model=ResetPasswordResponse)
+def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password using reset code."""
+    email = request.email.strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Verify code exists and not expired
+    if not user.password_reset_code or not user.password_reset_expires:
+        raise HTTPException(status_code=400, detail="No password reset requested")
+    
+    if datetime.utcnow() > user.password_reset_expires:
+        raise HTTPException(status_code=400, detail="Reset code has expired")
+    
+    if user.password_reset_code != request.reset_code.strip():
+        raise HTTPException(status_code=403, detail="Invalid reset code")
+    
+    # Validate new password
+    if len(request.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    # Update password and clear reset code
+    user.password_hash = hash_password(request.new_password)
+    user.password_reset_code = None
+    user.password_reset_expires = None
+    db.commit()
+    
+    print(f"[INFO] Password reset successful for {user.email}")
+    
+    return ResetPasswordResponse(message="Password reset successfully", success=True)
 
 
 # ============ LEAGUES ============
