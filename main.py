@@ -8,11 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
-from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from typing import List, Optional
 import jwt
-import logging
 import os
 import uuid
 import random
@@ -33,18 +31,6 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 days
 ADMIN_USERNAME = "admin"
 ADMIN_EMAILS = {"bblaiej@gmail.com"}
 TUNISIAN_LEAGUE_NAME = "Tunisian League"
-
-# API-Football supplies the official final scores. The key must be stored as a
-# Railway variable and is intentionally never returned by this API.
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
-API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
-API_FOOTBALL_TUNISIA_LEAGUE_ID = int(os.getenv("API_FOOTBALL_TUNISIA_LEAGUE_ID", "202"))
-API_FOOTBALL_SEASON = int(os.getenv("API_FOOTBALL_SEASON", str(datetime.utcnow().year)))
-RESULT_SYNC_INTERVAL_MINUTES = int(os.getenv("RESULT_SYNC_INTERVAL_MINUTES", "30"))
-RESULT_SYNC_MINUTES_AFTER_KICKOFF = int(os.getenv("RESULT_SYNC_MINUTES_AFTER_KICKOFF", "105"))
-RESULT_SYNC_LOOKBACK_HOURS = int(os.getenv("RESULT_SYNC_LOOKBACK_HOURS", "24"))
-
-logger = logging.getLogger(__name__)
 
 # Google Sign-In: create an OAuth client ID in Google Cloud Console (Web
 # application) and put it here. See SETUP notes in the delivery message.
@@ -84,30 +70,13 @@ class User(Base):
     username = Column(String(50), unique=True, index=True)
     email = Column(String(255), unique=True, index=True)
     password_hash = Column(String(255), nullable=True)  # null for Google-only accounts
-    password_reset_code = Column(String, nullable=True)
-    password_reset_expires = Column(DateTime, nullable=True)
     auth_provider = Column(String(20), default="email")  # "email" or "google"
     is_verified = Column(Boolean, default=False)
     verification_code = Column(String(10), nullable=True)
     verification_expires = Column(DateTime, nullable=True)
+    password_reset_code = Column(String(10), nullable=True)
+    password_reset_expires = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str
-
-class ForgotPasswordResponse(BaseModel):
-    message: str
-    email_sent: bool
-
-class ResetPasswordRequest(BaseModel):
-    email: str
-    reset_code: str
-    new_password: str
-
-class ResetPasswordResponse(BaseModel):
-    message: str
-    success: bool
 
 
 class League(Base):
@@ -161,16 +130,6 @@ class Prediction(Base):
     x2_applied = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
-class SendNotificationRequest(BaseModel):
-    notification_type: str  # "gameweek_reminder" | "match_alert"
-    gameweek: Optional[int] = None
-    message: Optional[str] = None
-
-class SendNotificationResponse(BaseModel):
-    message: str
-    emails_sent: int
-    success: bool
 
 Base.metadata.create_all(bind=engine)
 
@@ -290,6 +249,18 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
+class SendNotificationRequest(BaseModel):
+    notification_type: str  # "gameweek_reminder" | "match_alert"
+    gameweek: Optional[int] = None
+    message: Optional[str] = None
+
+
+class SendNotificationResponse(BaseModel):
+    message: str
+    emails_sent: int
+    success: bool
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -321,6 +292,13 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """Dependency that ensures user is admin."""
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 
 def is_admin_user(user: User) -> bool:
@@ -407,6 +385,117 @@ def send_verification_email(to_email: str, code: str):
         raise HTTPException(status_code=500, detail=f"Couldn't send verification email: {error_detail}")
 
 
+def send_email(email: str, subject: str, html: str):
+    """Generic email sending function via Resend."""
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
+        raise Exception("Email sending isn't configured (missing RESEND_API_KEY / RESEND_FROM_EMAIL)")
+
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": email,
+        "subject": subject,
+        "html": html,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        error_detail = str(e)
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json().get('message', str(e))
+            except:
+                error_detail = e.response.text or str(e)
+        raise Exception(f"Couldn't send email: {error_detail}")
+
+
+def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
+    """Generate a catchy gameweek reminder email."""
+    return f"""
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #ffd700; padding: 30px 20px; border-radius: 12px; text-align: center; margin-bottom: 30px; }}
+        .header h1 {{ margin: 0; font-size: 28px; font-weight: 800; }}
+        .header p {{ margin: 8px 0 0 0; font-size: 14px; color: #ddd; }}
+        .content {{ background: #f5f5f5; padding: 30px 20px; border-radius: 12px; margin-bottom: 20px; }}
+        .content h2 {{ color: #1a1a2e; margin-top: 0; font-size: 20px; }}
+        .highlight {{ background: linear-gradient(135deg, rgba(255, 215, 0, 0.1), rgba(255, 215, 0, 0.05)); padding: 20px; border-left: 4px solid #ffd700; border-radius: 6px; margin: 20px 0; }}
+        .highlight strong {{ color: #ffd700; }}
+        .cta {{ display: inline-block; background: #ffd700; color: #1a1a2e; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 800; margin: 20px 0; }}
+        .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 30px; }}
+        .stats {{ display: flex; justify-content: space-around; text-align: center; margin: 20px 0; }}
+        .stat-box {{ flex: 1; }}
+        .stat-number {{ font-size: 24px; font-weight: 800; color: #ffd700; }}
+        .stat-label {{ font-size: 12px; color: #666; margin-top: 5px; text-transform: uppercase; }}
+    </style>
+    
+    <div class="container">
+        <div class="header">
+            <h1>⚽ PRONOS TUNISIE</h1>
+            <p>Journée {gameweek} — Les matchs t'attendent!</p>
+        </div>
+        
+        <div class="content">
+            <h2>Salut {username}! 👋</h2>
+            
+            <p>La Journée <strong>{gameweek}</strong> de la Ligue 1 démarre <strong>DEMAIN</strong> et c'est le moment de faire tes pronostics!</p>
+            
+            <div class="highlight">
+                <strong>⏱️ C'est quoi le plan?</strong><br>
+                Tu as jusqu'à 15 minutes avant chaque match pour deviner les scores. Plus tu devines juste, plus tu gagnes de points! 🎯
+            </div>
+            
+            <h3>🎁 Comment ça marche?</h3>
+            <ul>
+                <li><strong>Score correct</strong> → Tu gagnes des points selon les cotes du match</li>
+                <li><strong>Score exact</strong> → Bonus surprise de rareté! 🌟</li>
+                <li><strong>Joker ×2</strong> → Une fois par journée pour doubler tes points sur UN match</li>
+            </ul>
+            
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">∞</div>
+                    <div class="stat-label">Enjeu</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">100%</div>
+                    <div class="stat-label">Gratuit</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">30s</div>
+                    <div class="stat-label">À toi</div>
+                </div>
+            </div>
+            
+            <p style="text-align: center;">
+                <a href="https://pronos-tunisie.vercel.app" class="cta">ALLER FAIRE MES PRONOS →</a>
+            </p>
+            
+            <div class="highlight" style="border-left-color: #42c98a; background: rgba(66, 201, 138, 0.05);">
+                <strong style="color: #42c98a;">💪 Tip Pro:</strong> Les premiers à pronostiquer voient souvent les cotes avant tout le monde. Sois rapide! ⚡
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Tu reçois cet email parce que tu as un compte Pronos Tunisie. C'est le seul reminder qu'on va t'envoyer.</p>
+            <p style="color: #ccc; margin-top: 10px;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
+        </div>
+    </div>
+    """
+
+
 # ============ POINTS ENGINE ============
 def calculate_points(prediction: Prediction, match: Match, all_predictions_for_match: List[Prediction]) -> dict:
     if match.home_goals is None or match.away_goals is None:
@@ -474,123 +563,6 @@ def recalc_all_members_points(db: Session):
     for member in members:
         member.points = get_user_total_points(member.user_id, db)
     db.commit()
-
-
-def apply_match_result(match: Match, home_goals: int, away_goals: int, db: Session) -> int:
-    """Save a final score and recalculate every affected prediction."""
-    match.home_goals = home_goals
-    match.away_goals = away_goals
-    match.status = "finished"
-
-    all_predictions = db.query(Prediction).filter(Prediction.match_id == match.id).all()
-    for prediction in all_predictions:
-        points_data = calculate_points(prediction, match, all_predictions)
-        prediction.points_earned = points_data['total']
-        prediction.is_exact_match = points_data['is_exact']
-        prediction.rarity_bonus = points_data['exact_bonus']
-
-    db.commit()
-    recalc_all_members_points(db)
-    return len(all_predictions)
-
-
-def normalise_team_name(name: str) -> str:
-    """Normalise provider and local team names for reliable fixture matching."""
-    import unicodedata
-
-    normalised = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
-    for token in (" de ", " du ", "union sportive ", "us ", "es ", "cs ", "as ", "ca "):
-        normalised = normalised.replace(token, "")
-    normalised = "".join(character for character in normalised if character.isalnum())
-    # Keep local display names compatible with their provider spelling.
-    return {"hamamsousse": "hammamsousse"}.get(normalised, normalised)
-
-
-def find_provider_fixture(match: Match, fixtures: list) -> Optional[dict]:
-    home_name = normalise_team_name(match.home_team)
-    away_name = normalise_team_name(match.away_team)
-
-    def names_match(first: str, second: str) -> bool:
-        return first == second or (min(len(first), len(second)) >= 5 and (first.startswith(second) or second.startswith(first)))
-
-    for fixture in fixtures:
-        teams = fixture.get("teams", {})
-        if (
-            names_match(normalise_team_name(teams.get("home", {}).get("name", "")), home_name)
-            and names_match(normalise_team_name(teams.get("away", {}).get("name", "")), away_name)
-        ):
-            return fixture
-    return None
-
-
-def sync_finished_match_results() -> dict:
-    """Import only final API-Football results for recently completed matches."""
-    if not API_FOOTBALL_KEY:
-        logger.warning("Final-score sync skipped: API_FOOTBALL_KEY is not configured")
-        return {"updated": 0, "checked_dates": 0, "reason": "API_FOOTBALL_KEY is not configured"}
-
-    now = datetime.utcnow()
-    earliest_kickoff = now - timedelta(hours=RESULT_SYNC_LOOKBACK_HOURS)
-    latest_kickoff = now - timedelta(minutes=RESULT_SYNC_MINUTES_AFTER_KICKOFF)
-    db = SessionLocal()
-    updated = 0
-    checked_dates = 0
-
-    try:
-        candidates = db.query(Match).filter(
-            Match.status != "finished",
-            Match.kickoff_time >= earliest_kickoff,
-            Match.kickoff_time <= latest_kickoff,
-        ).all()
-        candidates_by_date = {}
-        for match in candidates:
-            candidates_by_date.setdefault(match.kickoff_time.date(), []).append(match)
-
-        headers = {"x-apisports-key": API_FOOTBALL_KEY}
-        final_statuses = {"FT", "AET", "PEN"}
-        for match_date, matches in candidates_by_date.items():
-            response = requests.get(
-                f"{API_FOOTBALL_BASE_URL}/fixtures",
-                headers=headers,
-                params={
-                    "league": API_FOOTBALL_TUNISIA_LEAGUE_ID,
-                    "season": API_FOOTBALL_SEASON,
-                    "date": match_date.isoformat(),
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("errors"):
-                logger.warning("API-Football returned errors for %s: %s", match_date, payload["errors"])
-                continue
-
-            checked_dates += 1
-            fixtures = payload.get("response", [])
-            for match in matches:
-                fixture = find_provider_fixture(match, fixtures)
-                if not fixture:
-                    logger.info("No API-Football fixture found for %s vs %s", match.home_team, match.away_team)
-                    continue
-
-                if fixture.get("fixture", {}).get("status", {}).get("short") not in final_statuses:
-                    continue
-
-                goals = fixture.get("goals", {})
-                home_goals, away_goals = goals.get("home"), goals.get("away")
-                if not isinstance(home_goals, int) or not isinstance(away_goals, int):
-                    logger.warning("Final fixture has no valid score for %s vs %s", match.home_team, match.away_team)
-                    continue
-
-                apply_match_result(match, home_goals, away_goals, db)
-                updated += 1
-
-        return {"updated": updated, "checked_dates": checked_dates, "eligible_matches": len(candidates)}
-    except requests.RequestException as error:
-        logger.exception("API-Football final-score sync failed: %s", error)
-        return {"updated": updated, "checked_dates": checked_dates, "error": "Could not reach API-Football"}
-    finally:
-        db.close()
 
 
 def get_or_create_tunisian_league(db: Session) -> League:
@@ -773,154 +745,6 @@ def get_me(authorization: str = Header(None), db: Session = Depends(get_db)):
     return user_to_response(user)
 
 
-@app.post("/auth/forgot-password", response_model=ForgotPasswordResponse)
-def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    """Request password reset code via email."""
-    email = request.email.strip().lower()
-    user = db.query(User).filter(User.email == email).first()
-    
-    if not user:
-        # Don't reveal if email exists (security)
-        return ForgotPasswordResponse(message="If an account exists with this email, a reset code has been sent.", email_sent=True)
-    
-    # Don't allow reset for Google-only accounts
-    if user.auth_provider == "google" or not user.password_hash:
-        return ForgotPasswordResponse(message="This account uses Google Sign-In. Please use Google to reset your password.", email_sent=False)
-    
-    # Generate reset code
-    reset_code = ''.join(random.choices(string.digits, k=6))
-    user.password_reset_code = reset_code
-    user.password_reset_expires = datetime.utcnow() + timedelta(minutes=15)
-    db.commit()
-    
-    # Send email
-    try:
-        send_email(
-            email=user.email,
-            subject="Réinitialise ton mot de passe - Pronos Tunisie",
-            html=f"""
-            <h2>Réinitialise ton mot de passe</h2>
-            <p>Ton code de réinitialisation:</p>
-            <h1 style="letter-spacing: 5px; font-family: monospace;">{reset_code}</h1>
-            <p>Ce code expire dans 15 minutes.</p>
-            <p>Si tu n'as pas demandé une réinitialisation, ignore cet email.</p>
-            """
-        )
-        print(f"[INFO] Password reset code sent to {user.email}")
-        return ForgotPasswordResponse(message="Reset code sent to your email", email_sent=True)
-    except Exception as e:
-        print(f"[ERROR] Failed to send password reset email: {e}")
-        return ForgotPasswordResponse(message="Failed to send reset code. Please try again.", email_sent=False)
-
-
-@app.post("/auth/reset-password", response_model=ResetPasswordResponse)
-def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
-    """Reset password using reset code."""
-    email = request.email.strip().lower()
-    user = db.query(User).filter(User.email == email).first()
-    
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Verify code exists and not expired
-    if not user.password_reset_code or not user.password_reset_expires:
-        raise HTTPException(status_code=400, detail="No password reset requested")
-    
-    if datetime.utcnow() > user.password_reset_expires:
-        raise HTTPException(status_code=400, detail="Reset code has expired")
-    
-    if user.password_reset_code != request.reset_code.strip():
-        raise HTTPException(status_code=403, detail="Invalid reset code")
-    
-    # Validate new password
-    if len(request.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    
-    # Update password and clear reset code
-    user.password_hash = hash_password(request.new_password)
-    user.password_reset_code = None
-    user.password_reset_expires = None
-    db.commit()
-    
-    print(f"[INFO] Password reset successful for {user.email}")
-    
-    return ResetPasswordResponse(message="Password reset successfully", success=True)
-
-
-def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
-    """Generate a catchy gameweek reminder email."""
-    return f"""
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #ffd700; padding: 30px 20px; border-radius: 12px; text-align: center; margin-bottom: 30px; }}
-        .header h1 {{ margin: 0; font-size: 28px; font-weight: 800; }}
-        .header p {{ margin: 8px 0 0 0; font-size: 14px; color: #ddd; }}
-        .content {{ background: #f5f5f5; padding: 30px 20px; border-radius: 12px; margin-bottom: 20px; }}
-        .content h2 {{ color: #1a1a2e; margin-top: 0; font-size: 20px; }}
-        .highlight {{ background: linear-gradient(135deg, rgba(255, 215, 0, 0.1), rgba(255, 215, 0, 0.05)); padding: 20px; border-left: 4px solid #ffd700; border-radius: 6px; margin: 20px 0; }}
-        .highlight strong {{ color: #ffd700; }}
-        .cta {{ display: inline-block; background: #ffd700; color: #1a1a2e; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 800; margin: 20px 0; }}
-        .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 30px; }}
-        .stats {{ display: flex; justify-content: space-around; text-align: center; margin: 20px 0; }}
-        .stat-box {{ flex: 1; }}
-        .stat-number {{ font-size: 24px; font-weight: 800; color: #ffd700; }}
-        .stat-label {{ font-size: 12px; color: #666; margin-top: 5px; text-transform: uppercase; }}
-    </style>
-    
-    <div class="container">
-        <div class="header">
-            <h1>⚽ PRONOS TUNISIE</h1>
-            <p>Journée {gameweek} — Les matchs t'attendent!</p>
-        </div>
-        
-        <div class="content">
-            <h2>Salut {username}! 👋</h2>
-            
-            <p>La Journée <strong>{gameweek}</strong> de la Ligue 1 démarre <strong>DEMAIN</strong> et c'est le moment de faire tes pronostics!</p>
-            
-            <div class="highlight">
-                <strong>⏱️ C'est quoi le plan?</strong><br>
-                Tu as jusqu'à 15 minutes avant chaque match pour deviner les scores. Plus tu devines juste, plus tu gagnes de points! 🎯
-            </div>
-            
-            <h3>🎁 Comment ça marche?</h3>
-            <ul>
-                <li><strong>Score correct</strong> → Tu gagnes des points selon les cotes du match</li>
-                <li><strong>Score exact</strong> → Bonus surprise de rareté! 🌟</li>
-                <li><strong>Joker ×2</strong> → Une fois par journée pour doubler tes points sur UN match</li>
-            </ul>
-            
-            <div class="stats">
-                <div class="stat-box">
-                    <div class="stat-number">∞</div>
-                    <div class="stat-label">Enjeu</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">100%</div>
-                    <div class="stat-label">Gratuit</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">30s</div>
-                    <div class="stat-label">À toi</div>
-                </div>
-            </div>
-            
-            <p style="text-align: center;">
-                <a href="https://pronos-tunisie.vercel.app" class="cta">ALLER FAIRE MES PRONOS →</a>
-            </p>
-            
-            <div class="highlight" style="border-left-color: #42c98a; background: rgba(66, 201, 138, 0.05);">
-                <strong style="color: #42c98a;">💪 Tip Pro:</strong> Les premiers à pronostiquer voient souvent les cotes avant tout le monde. Sois rapide! ⚡
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>Tu reçois cet email parce que tu as un compte Pronos Tunisie. C'est le seul reminder qu'on va t'envoyer.</p>
-            <p style="color: #ccc; margin-top: 10px;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
-        </div>
-    </div>
-    """
 
 # ============ LEAGUES ============
 @app.post("/leagues", response_model=LeagueResponse)
@@ -1068,12 +892,6 @@ def get_leaderboard(league_id: str, db: Session = Depends(get_db)):
                 rank=rank,
             ))
     return result
-
-
-@app.get("/leagues/{league_id}/standings")
-def get_standings(league_id: str, db: Session = Depends(get_db)):
-    """Backward-compatible alias for the league leaderboard."""
-    return get_leaderboard(league_id, db)
 
 
 @app.delete("/leagues/{league_id}")
@@ -1317,46 +1135,6 @@ def get_user_predictions(
         })
     return result
 
-# Add this endpoint to main.py (after the get_user_predictions endpoint, around line 1142)
-
-@app.get("/users/{user_id}/predictions/finished")
-def get_user_finished_predictions(user_id: str, db: Session = Depends(get_db)):
-    """Get another user's predictions for finished matches only."""
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    predictions = db.query(Prediction).filter(Prediction.user_id == user_id).all()
-
-    result = []
-    for pred in predictions:
-        match = db.query(Match).filter(Match.id == pred.match_id).first()
-        if not match or match.status != "finished":
-            continue
-
-        base_points = 0
-        if pred.predicted_result == '1':
-            base_points = match.odds_home if match.home_goals > match.away_goals else 0
-        elif pred.predicted_result == 'X':
-            base_points = match.odds_draw if match.home_goals == match.away_goals else 0
-        else:
-            base_points = match.odds_away if match.home_goals < match.away_goals else 0
-
-        result.append({
-            "id": pred.id,
-            "match_id": pred.match_id,
-            "home_team": match.home_team,
-            "away_team": match.away_team,
-            "gameweek": match.gameweek,
-            "predicted_home_goals": pred.predicted_home_goals,
-            "predicted_away_goals": pred.predicted_away_goals,
-            "actual_home_goals": match.home_goals,
-            "actual_away_goals": match.away_goals,
-            "points_earned": pred.points_earned,
-            "is_exact_match": pred.is_exact_match,
-        })
-    
-    return sorted(result, key=lambda x: x['gameweek'])
 
 @app.get("/predictions/x2-status/{gameweek}")
 def check_x2_status(
@@ -1395,22 +1173,27 @@ def set_match_result(
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    predictions_updated = apply_match_result(match, home_goals, away_goals, db)
+    match.home_goals = home_goals
+    match.away_goals = away_goals
+    match.status = "finished"
+    db.commit()
+
+    all_predictions = db.query(Prediction).filter(Prediction.match_id == match_id).all()
+    for pred in all_predictions:
+        points_data = calculate_points(pred, match, all_predictions)
+        pred.points_earned = points_data['total']
+        pred.is_exact_match = points_data['is_exact']
+        pred.rarity_bonus = points_data['exact_bonus']
+    db.commit()
+
+    recalc_all_members_points(db)
 
     return {
         "message": "Match result set and points calculated",
         "match_id": match_id,
         "score": f"{home_goals}-{away_goals}",
-        "predictions_updated": predictions_updated,
+        "predictions_updated": len(all_predictions),
     }
-
-
-@app.post("/admin/results/sync")
-def sync_results_now(authorization: str = Header(None), db: Session = Depends(get_db)):
-    """Allow an administrator to run the final-score import immediately."""
-    user = get_current_user(authorization, db)
-    require_admin(user)
-    return sync_finished_match_results()
 
 
 @app.put("/admin/matches/{match_id}/reset")
@@ -1443,26 +1226,24 @@ def reset_match_result(match_id: str, authorization: str = Header(None), db: Ses
     }
 
 
+# ============ ADMIN: NOTIFICATIONS ============
 @app.post("/admin/send-notification", response_model=SendNotificationResponse)
 def send_notification(
     request: SendNotificationRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
     db: Session = Depends(get_db)
 ):
     """Admin endpoint to send notifications to all users."""
     
-    # Verify admin using EMAIL instead of username
-    ADMIN_EMAILS = {"bblaiej@gmail.com"}  # Add your admin emails here
-    
-    if current_user.email not in ADMIN_EMAILS:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    # Rest of the function stays the same...
-    # Get all verified users
-    users = db.query(User).filter(User.is_verified == True).all()
+    # Get ALL users from database (verified or not)
+    users = db.query(User).all()
     
     if not users:
-        return SendNotificationResponse(message="No users to notify", emails_sent=0, success=False)
+        return SendNotificationResponse(
+            message="No users in database to notify",
+            emails_sent=0,
+            success=False
+        )
     
     emails_sent = 0
     
@@ -1471,6 +1252,11 @@ def send_notification(
         
         for user in users:
             try:
+                # Skip users without email
+                if not user.email:
+                    print(f"[SKIP] User {user.username} has no email")
+                    continue
+                
                 send_email(
                     email=user.email,
                     subject=f"⏰ Pronos Tunisie — Journée {gameweek} démarre demain!",
@@ -1487,38 +1273,17 @@ def send_notification(
             success=emails_sent > 0
         )
     
-    return SendNotificationResponse(message="Unknown notification type", emails_sent=0, success=False)
+    return SendNotificationResponse(
+        message="Unknown notification type",
+        emails_sent=0,
+        success=False
+    )
 
 
 # ============ HEALTH ============
 @app.get("/health")
 def health():
-    return {"status": "ok", "final_score_sync_configured": bool(API_FOOTBALL_KEY)}
-
-
-score_sync_scheduler = BackgroundScheduler(timezone="UTC")
-
-
-@app.on_event("startup")
-def start_score_sync_scheduler():
-    if API_FOOTBALL_KEY and not score_sync_scheduler.running:
-        score_sync_scheduler.add_job(
-            sync_finished_match_results,
-            "interval",
-            minutes=RESULT_SYNC_INTERVAL_MINUTES,
-            id="api-football-final-score-sync",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
-        score_sync_scheduler.start()
-        logger.info("Final-score sync scheduled every %s minutes", RESULT_SYNC_INTERVAL_MINUTES)
-
-
-@app.on_event("shutdown")
-def stop_score_sync_scheduler():
-    if score_sync_scheduler.running:
-        score_sync_scheduler.shutdown(wait=False)
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
