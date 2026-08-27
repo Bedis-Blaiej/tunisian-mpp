@@ -398,7 +398,7 @@ Salut,
 
 Tu as une journée à pronostiquer sur Pronos Tunisie!
 
-Va faire tes pronostics: https://pronos-tunisie.vercel.app
+Va faire tes pronostics: https://tunisian-mpp-frontend.vercel.app
 
 Merci,
 L'équipe Pronos Tunisie"""
@@ -412,7 +412,7 @@ L'équipe Pronos Tunisie"""
         "reply_to": RESEND_FROM_EMAIL,  # Reply-To header
         "headers": {
             "X-Entity-Ref-ID": email,
-            "List-Unsubscribe": "<https://pronos-tunisie.vercel.app>",
+            "List-Unsubscribe": "<https://tunisian-mpp-frontend.vercel.app>",
             "X-Mailer": "Pronos Tunisie",
         }
     }
@@ -465,7 +465,7 @@ def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
             </div>
 
             <div style="margin: 25px 0; text-align: center;">
-                <a href="https://pronos-tunisie.vercel.app" style="display: inline-block; background-color: #ffd700; color: #1a1a2e; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">Aller faire mes pronostics</a>
+                <a href="https://tunisian-mpp-frontend.vercel.app" style="display: inline-block; background-color: #ffd700; color: #1a1a2e; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">Aller faire mes pronostics</a>
             </div>
 
             <p style="color: #666; font-size: 13px; margin-top: 20px;">Vous avez 15 minutes avant chaque match pour faire votre prédiction. Bonne chance!</p>
@@ -474,7 +474,7 @@ def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
         <div style="border-top: 1px solid #e0e0e0; padding-top: 15px; margin-top: 25px; font-size: 12px; color: #999;">
             <p style="margin: 0 0 10px 0;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
             <p style="margin: 0; font-size: 11px;">
-                <a href="https://pronos-tunisie.vercel.app" style="color: #ffd700; text-decoration: none;">Visitez notre site</a>
+                <a href="https://tunisian-mpp-frontend.vercel.app" style="color: #ffd700; text-decoration: none;">Visitez notre site</a>
             </p>
         </div>
 
