@@ -1451,10 +1451,13 @@ def send_notification(
 ):
     """Admin endpoint to send notifications to all users."""
     
-    # Verify admin
-    if current_user.username not in ADMIN_USERNAME:
+    # Verify admin using EMAIL instead of username
+    ADMIN_EMAILS = {"bblaiej@gmail.com"}  # Add your admin emails here
+    
+    if current_user.email not in ADMIN_EMAILS:
         raise HTTPException(status_code=403, detail="Admin access required")
     
+    # Rest of the function stays the same...
     # Get all verified users
     users = db.query(User).filter(User.is_verified == True).all()
     
@@ -1485,6 +1488,7 @@ def send_notification(
         )
     
     return SendNotificationResponse(message="Unknown notification type", emails_sent=0, success=False)
+
 
 # ============ HEALTH ============
 @app.get("/health")
