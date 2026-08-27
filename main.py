@@ -385,16 +385,36 @@ def send_verification_email(to_email: str, code: str):
         raise HTTPException(status_code=500, detail=f"Couldn't send verification email: {error_detail}")
 
 
-def send_email(email: str, subject: str, html: str):
-    """Generic email sending function via Resend."""
+def send_email(email: str, subject: str, html: str, text: Optional[str] = None):
+    """Generic email sending function via Resend with proper headers."""
     if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
         raise Exception("Email sending isn't configured (missing RESEND_API_KEY / RESEND_FROM_EMAIL)")
+
+    # Create plain text version if not provided
+    if not text:
+        text = """Pronos Tunisie - Gameweek Reminder
+
+Salut,
+
+Tu as une journée à pronostiquer sur Pronos Tunisie!
+
+Va faire tes pronostics: https://pronos-tunisie.vercel.app
+
+Merci,
+L'équipe Pronos Tunisie"""
 
     payload = {
         "from": RESEND_FROM_EMAIL,
         "to": email,
         "subject": subject,
         "html": html,
+        "text": text,  # Plain text alternative (important for spam filters!)
+        "reply_to": RESEND_FROM_EMAIL,  # Reply-To header
+        "headers": {
+            "X-Entity-Ref-ID": email,
+            "List-Unsubscribe": "<https://pronos-tunisie.vercel.app>",
+            "X-Mailer": "Pronos Tunisie",
+        }
     }
 
     headers = {
@@ -421,77 +441,43 @@ def send_email(email: str, subject: str, html: str):
 
 
 def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
-    """Generate a catchy gameweek reminder email."""
+    """Generate a spam-safe gameweek reminder email."""
     return f"""
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #ffd700; padding: 30px 20px; border-radius: 12px; text-align: center; margin-bottom: 30px; }}
-        .header h1 {{ margin: 0; font-size: 28px; font-weight: 800; }}
-        .header p {{ margin: 8px 0 0 0; font-size: 14px; color: #ddd; }}
-        .content {{ background: #f5f5f5; padding: 30px 20px; border-radius: 12px; margin-bottom: 20px; }}
-        .content h2 {{ color: #1a1a2e; margin-top: 0; font-size: 20px; }}
-        .highlight {{ background: linear-gradient(135deg, rgba(255, 215, 0, 0.1), rgba(255, 215, 0, 0.05)); padding: 20px; border-left: 4px solid #ffd700; border-radius: 6px; margin: 20px 0; }}
-        .highlight strong {{ color: #ffd700; }}
-        .cta {{ display: inline-block; background: #ffd700; color: #1a1a2e; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 800; margin: 20px 0; }}
-        .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 30px; }}
-        .stats {{ display: flex; justify-content: space-around; text-align: center; margin: 20px 0; }}
-        .stat-box {{ flex: 1; }}
-        .stat-number {{ font-size: 24px; font-weight: 800; color: #ffd700; }}
-        .stat-label {{ font-size: 12px; color: #666; margin-top: 5px; text-transform: uppercase; }}
-    </style>
-    
-    <div class="container">
-        <div class="header">
-            <h1>⚽ PRONOS TUNISIE</h1>
-            <p>Journée {gameweek} — Les matchs t'attendent!</p>
-        </div>
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
         
-        <div class="content">
-            <h2>Salut {username}! 👋</h2>
+        <div style="background-color: #f9f9f9; padding: 30px; border-radius: 8px; margin-bottom: 20px; border-top: 4px solid #ffd700;">
+            <h1 style="margin: 0 0 10px 0; font-size: 24px; color: #1a1a2e;">Pronos Tunisie</h1>
+            <p style="margin: 0; color: #666; font-size: 14px;">Journée {gameweek} — Nouvelles Prédictions</p>
+        </div>
+
+        <div style="margin-bottom: 20px; line-height: 1.6; color: #444;">
+            <p>Salut {username},</p>
             
-            <p>La Journée <strong>{gameweek}</strong> de la Ligue 1 démarre <strong>DEMAIN</strong> et c'est le moment de faire tes pronostics!</p>
-            
-            <div class="highlight">
-                <strong>⏱️ C'est quoi le plan?</strong><br>
-                Tu as jusqu'à 15 minutes avant chaque match pour deviner les scores. Plus tu devines juste, plus tu gagnes de points! 🎯
+            <p>La Journée <strong>{gameweek}</strong> de la Ligue 1 commence demain et c'est l'heure de faire tes pronostics sur Pronos Tunisie!</p>
+
+            <div style="background-color: #fff9e6; padding: 15px; border-left: 4px solid #ffd700; margin: 20px 0; border-radius: 4px;">
+                <p style="margin: 0; font-weight: bold; color: #1a1a2e;">Comment ça marche?</p>
+                <ul style="margin: 10px 0; padding-left: 20px; color: #444;">
+                    <li>Devinez les scores avant le coup d'envoi</li>
+                    <li>Gagnez des points selon la précision</li>
+                    <li>Utilisez votre joker ×2 pour doubler les points</li>
+                </ul>
             </div>
-            
-            <h3>🎁 Comment ça marche?</h3>
-            <ul>
-                <li><strong>Score correct</strong> → Tu gagnes des points selon les cotes du match</li>
-                <li><strong>Score exact</strong> → Bonus surprise de rareté! 🌟</li>
-                <li><strong>Joker ×2</strong> → Une fois par journée pour doubler tes points sur UN match</li>
-            </ul>
-            
-            <div class="stats">
-                <div class="stat-box">
-                    <div class="stat-number">∞</div>
-                    <div class="stat-label">Enjeu</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">100%</div>
-                    <div class="stat-label">Gratuit</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">30s</div>
-                    <div class="stat-label">À toi</div>
-                </div>
+
+            <div style="margin: 25px 0; text-align: center;">
+                <a href="https://pronos-tunisie.vercel.app" style="display: inline-block; background-color: #ffd700; color: #1a1a2e; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">Aller faire mes pronostics</a>
             </div>
-            
-            <p style="text-align: center;">
-                <a href="https://pronos-tunisie.vercel.app" class="cta">ALLER FAIRE MES PRONOS →</a>
+
+            <p style="color: #666; font-size: 13px; margin-top: 20px;">Vous avez 15 minutes avant chaque match pour faire votre prédiction. Bonne chance!</p>
+        </div>
+
+        <div style="border-top: 1px solid #e0e0e0; padding-top: 15px; margin-top: 25px; font-size: 12px; color: #999;">
+            <p style="margin: 0 0 10px 0;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
+            <p style="margin: 0; font-size: 11px;">
+                <a href="https://pronos-tunisie.vercel.app" style="color: #ffd700; text-decoration: none;">Visitez notre site</a>
             </p>
-            
-            <div class="highlight" style="border-left-color: #42c98a; background: rgba(66, 201, 138, 0.05);">
-                <strong style="color: #42c98a;">💪 Tip Pro:</strong> Les premiers à pronostiquer voient souvent les cotes avant tout le monde. Sois rapide! ⚡
-            </div>
         </div>
-        
-        <div class="footer">
-            <p>Tu reçois cet email parce que tu as un compte Pronos Tunisie. C'est le seul reminder qu'on va t'envoyer.</p>
-            <p style="color: #ccc; margin-top: 10px;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
-        </div>
+
     </div>
     """
 
