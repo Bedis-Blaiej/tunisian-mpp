@@ -398,7 +398,7 @@ Salut,
 
 Tu as une journée à pronostiquer sur Pronos Tunisie!
 
-Va faire tes pronostics: https://tunisian-mpp-frontend.vercel.app
+Va faire tes pronostics: https://pronos-tunisie.vercel.app
 
 Merci,
 L'équipe Pronos Tunisie"""
@@ -412,7 +412,7 @@ L'équipe Pronos Tunisie"""
         "reply_to": RESEND_FROM_EMAIL,  # Reply-To header
         "headers": {
             "X-Entity-Ref-ID": email,
-            "List-Unsubscribe": "<https://tunisian-mpp-frontend.vercel.app>",
+            "List-Unsubscribe": "<https://pronos-tunisie.vercel.app>",
             "X-Mailer": "Pronos Tunisie",
         }
     }
@@ -465,7 +465,7 @@ def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
             </div>
 
             <div style="margin: 25px 0; text-align: center;">
-                <a href="https://tunisian-mpp-frontend.vercel.app" style="display: inline-block; background-color: #ffd700; color: #1a1a2e; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">Aller faire mes pronostics</a>
+                <a href="https://pronos-tunisie.vercel.app" style="display: inline-block; background-color: #ffd700; color: #1a1a2e; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">Aller faire mes pronostics</a>
             </div>
 
             <p style="color: #666; font-size: 13px; margin-top: 20px;">Vous avez 15 minutes avant chaque match pour faire votre prédiction. Bonne chance!</p>
@@ -474,7 +474,7 @@ def generate_gameweek_reminder_email(username: str, gameweek: int) -> str:
         <div style="border-top: 1px solid #e0e0e0; padding-top: 15px; margin-top: 25px; font-size: 12px; color: #999;">
             <p style="margin: 0 0 10px 0;">© 2026 Pronos Tunisie — Le jeu de prédictions 100% tunisien</p>
             <p style="margin: 0; font-size: 11px;">
-                <a href="https://tunisian-mpp-frontend.vercel.app" style="color: #ffd700; text-decoration: none;">Visitez notre site</a>
+                <a href="https://pronos-tunisie.vercel.app" style="color: #ffd700; text-decoration: none;">Visitez notre site</a>
             </p>
         </div>
 
@@ -1119,6 +1119,66 @@ def get_user_predictions(
             "x2_applied": pred.x2_applied,
             "created_at": pred.created_at,
         })
+    return result
+
+
+@app.get("/users/{user_id}/predictions/finished")
+def get_user_finished_predictions(user_id: str, db: Session = Depends(get_db)):
+    """Get finished predictions for a specific user (for viewing other users' predictions)."""
+    
+    # Verify user exists
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Get all predictions for this user where match is finished
+    predictions = db.query(Prediction).filter(Prediction.user_id == user_id).all()
+    
+    result = []
+    for pred in predictions:
+        match = db.query(Match).filter(Match.id == pred.match_id).first()
+        if not match or match.status != "finished":
+            continue
+        
+        # Calculate base points for finished matches
+        base_points = 0
+        if pred.predicted_home_goals == match.home_goals and pred.predicted_away_goals == match.away_goals:
+            # Exact match
+            base_points = match.odds_home  # or any odds, doesn't matter for exact
+        elif (pred.predicted_home_goals > pred.predicted_away_goals and match.home_goals > match.away_goals) or \
+             (pred.predicted_home_goals < pred.predicted_away_goals and match.home_goals < match.away_goals) or \
+             (pred.predicted_home_goals == pred.predicted_away_goals and match.home_goals == match.away_goals):
+            # Correct result
+            if pred.predicted_home_goals > pred.predicted_away_goals:
+                base_points = match.odds_home
+            elif pred.predicted_home_goals < pred.predicted_away_goals:
+                base_points = match.odds_away
+            else:
+                base_points = match.odds_draw
+        
+        result.append({
+            "id": pred.id,
+            "match_id": pred.match_id,
+            "home_team": match.home_team,
+            "away_team": match.away_team,
+            "gameweek": match.gameweek,
+            "kickoff_time": match.kickoff_time,
+            "predicted_home_goals": pred.predicted_home_goals,
+            "predicted_away_goals": pred.predicted_away_goals,
+            "actual_home_goals": match.home_goals,
+            "actual_away_goals": match.away_goals,
+            "match_status": match.status,
+            "base_points": base_points,
+            "exact_bonus": pred.rarity_bonus,
+            "x2_multiplier": 2 if pred.x2_applied else 1,
+            "points_earned": pred.points_earned,
+            "is_exact_match": pred.is_exact_match,
+            "x2_applied": pred.x2_applied,
+            "created_at": pred.created_at,
+        })
+    
+    # Sort by gameweek ascending
+    result.sort(key=lambda x: x["gameweek"])
     return result
 
 
